@@ -1,2 +1,2 @@
-# Siletshot.exe
+# siletshot.go
 Screenshot tool
