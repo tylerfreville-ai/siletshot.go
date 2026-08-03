@@ -1,0 +1,20 @@
+name: Build SilentShot
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Resolve dependencies
+        run: go mod tidy
+      - name: Build single-file exe, no console window
+        run: go build -ldflags "-H=windowsgui" -trimpath -o SilentShot.exe .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SilentShot
+          path: SilentShot.exe
