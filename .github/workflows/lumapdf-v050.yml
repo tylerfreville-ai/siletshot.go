@@ -40,6 +40,7 @@ jobs:
           base64 --decode .lumapdf/v050.patch.gz.b64 | gzip -dc > v050.patch
           cd LumaPDF_RazrFold_2026_v02
           git apply ../v050.patch
+          git diff --check
 
       - name: Direct manipulation regression guards
         shell: bash
@@ -51,34 +52,61 @@ jobs:
           MAIN="$ROOT/app/src/main/java/com/tstudio/lumapdf/MainActivity.kt"
           BUILD="$ROOT/app/build.gradle.kts"
 
-          grep -q 'versionCode = 6' "$BUILD"
-          grep -q 'versionName = "0.5.0-direct-manipulation"' "$BUILD"
-          grep -q 'ScaleGestureDetector' "$CANVAS"
-          grep -q 'MAX_ZOOM = 6f' "$CANVAS"
-          grep -q 'fun onTextMoved' "$CANVAS"
-          grep -q 'fun onImageTransformed' "$CANVAS"
-          grep -q 'private fun resizeRect' "$CANVAS"
-          grep -q 'private fun translatedInside' "$CANVAS"
-          grep -q 'fun moveText' "$ENGINE"
-          grep -q 'fun deleteText' "$ENGINE"
-          grep -q 'fun duplicateText' "$ENGINE"
-          grep -q 'fun addTextMarkup' "$ENGINE"
-          grep -q 'fun moveImage' "$ENGINE"
-          grep -q 'fun duplicateImage' "$ENGINE"
-          grep -q 'fun movePage' "$ENGINE"
-          grep -q 'fun duplicatePage' "$ENGINE"
-          grep -q 'fun insertBlankPage' "$ENGINE"
-          grep -q 'doc.rearrangePages' "$ENGINE"
-          grep -q 'appendPageText(doc, page, newRect' "$ENGINE"
-          grep -q 'redaction.applyRedaction' "$ENGINE"
-          grep -q 'verifySavedText(out)' "$ENGINE"
-          grep -q 'showZoomMenu' "$MAIN"
-          grep -q 'duplicateSelection' "$MAIN"
-          grep -q 'deleteSelection' "$MAIN"
-          grep -q 'showMarkupMenu' "$MAIN"
-          if grep -q 'TYPE_FREE_TEXT' "$ENGINE"; then echo 'FreeText text editing returned'; exit 1; fi
-          if grep -q 'doc.bake(true, false)' "$ENGINE"; then echo 'Save-time bake returned'; exit 1; fi
-          if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw-pixel renderer returned'; exit 1; fi
+          require_literal() {
+            local file="$1"
+            local text="$2"
+            local label="$3"
+            if grep -Fq -- "$text" "$file"; then
+              echo "PASS: $label"
+            else
+              echo "FAIL: $label"
+              echo "Expected literal: $text"
+              echo "File: $file"
+              exit 1
+            fi
+          }
+          forbid_literal() {
+            local file="$1"
+            local text="$2"
+            local label="$3"
+            if grep -Fq -- "$text" "$file"; then
+              echo "FAIL: forbidden $label returned"
+              grep -Fn -- "$text" "$file" || true
+              exit 1
+            else
+              echo "PASS: $label absent"
+            fi
+          }
+
+          require_literal "$BUILD" 'versionCode = 6' 'version code'
+          require_literal "$BUILD" 'versionName = "0.5.0-direct-manipulation"' 'version name'
+          require_literal "$CANVAS" 'ScaleGestureDetector' 'pinch zoom detector'
+          require_literal "$CANVAS" 'MAX_ZOOM = 6f' '6x zoom ceiling'
+          require_literal "$CANVAS" 'fun onTextMoved' 'text drag callback'
+          require_literal "$CANVAS" 'fun onImageTransformed' 'image transform callback'
+          require_literal "$CANVAS" 'private fun resizeRect' 'image resize handles'
+          require_literal "$CANVAS" 'private fun translatedInside' 'bounded object movement'
+          require_literal "$ENGINE" 'fun moveText' 'text movement engine'
+          require_literal "$ENGINE" 'fun deleteText' 'text deletion engine'
+          require_literal "$ENGINE" 'fun duplicateText' 'text duplication engine'
+          require_literal "$ENGINE" 'fun addTextMarkup' 'text markup engine'
+          require_literal "$ENGINE" 'fun moveImage' 'image movement engine'
+          require_literal "$ENGINE" 'fun duplicateImage' 'image duplication engine'
+          require_literal "$ENGINE" 'fun movePage' 'page movement engine'
+          require_literal "$ENGINE" 'fun duplicatePage' 'page duplication engine'
+          require_literal "$ENGINE" 'fun insertBlankPage' 'blank page insertion'
+          require_literal "$ENGINE" 'doc.rearrangePages' 'native page rearrangement'
+          require_literal "$ENGINE" 'appendPageText(doc, page, newRect' 'moved text remains direct page content'
+          require_literal "$ENGINE" 'redaction.applyRedaction' 'object-local content removal'
+          require_literal "$ENGINE" 'verifySavedText(out)' 'save/reopen text verifier'
+          require_literal "$MAIN" 'showZoomMenu' 'zoom menu UI'
+          require_literal "$MAIN" 'duplicateSelection' 'duplicate selection UI'
+          require_literal "$MAIN" 'deleteSelection' 'delete selection UI'
+          require_literal "$MAIN" 'showMarkupMenu' 'markup selection UI'
+
+          forbid_literal "$ENGINE" 'TYPE_FREE_TEXT' 'FreeText text editing path'
+          forbid_literal "$ENGINE" 'doc.bake(true, false)' 'save-time annotation bake'
+          forbid_literal "$ENGINE" 'bitmap.setPixels' 'unsafe raw-pixel renderer'
 
       - uses: actions/setup-java@v5
         with:
@@ -113,9 +141,9 @@ jobs:
           test -f "$APK"
           file "$APK"
           unzip -tq "$APK"
-          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmupdf_java.so'
+          unzip -l "$APK" | grep -Fq 'lib/arm64-v8a/libmupdf_java.so'
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | tee LumaPDF-v050-badging.txt
-          grep -q "versionName='0.5.0-direct-manipulation'" LumaPDF-v050-badging.txt
+          grep -Fq "versionName='0.5.0-direct-manipulation'" LumaPDF-v050-badging.txt
           ls -lh "$APK"
           sha256sum "$APK" | tee LumaPDF-v050-apk.sha256
 
