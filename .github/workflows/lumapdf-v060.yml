@@ -94,7 +94,7 @@ jobs:
           require_literal "$CANVAS" 'fun fitWidth' 'fit-width command'
           require_literal "$UI" 'fun commandButton' 'explicit command control component'
           require_literal "$UI" 'require(label.isNotBlank())' 'blank-control prevention'
-          require_literal "$ROOT/V06_BUILD_NOTES.md" 'Render-first architecture' 'v0.6 architecture notes'
+          require_literal "$ROOT/V06_BUILD_NOTES.md" 'PDF page painting is isolated from editable-object analysis.' 'v0.6 architecture notes'
 
           forbid_literal "$MAIN" 'MaterialButton' 'MaterialButton editor shell dependency'
           forbid_literal "$ENGINE" 'TYPE_FREE_TEXT' 'FreeText text editing path'
