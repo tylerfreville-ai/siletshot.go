@@ -1,0 +1,95 @@
+name: Build LumaPDF v0.4 Text Engine APK
+
+on:
+  push:
+    branches: [lumapdf-build]
+    paths:
+      - '.lumapdf/v04source.part*'
+      - '.github/workflows/lumapdf-v04.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct v0.4 source
+        shell: bash
+        run: |
+          cat .lumapdf/v04source.part* | base64 --decode > LumaPDF-v040-source.zip
+          echo '25602533d090916b991e0b30d8df7cee9d11979a66bb050fcc4063ae64514c9b  LumaPDF-v040-source.zip' | sha256sum -c -
+          unzip -q LumaPDF-v040-source.zip
+          test -f LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
+          test -f LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore
+
+      - name: Text-engine regression guards
+        shell: bash
+        run: |
+          ENGINE='LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
+          BUILD='LumaPDF_RazrFold_2026_v04/app/build.gradle.kts'
+          grep -q 'annotationObjectNumber' "$ENGINE"
+          grep -q 'page.getAnnotations()' "$ENGINE"
+          grep -q 'setExplicitTextAppearance' "$ENGINE"
+          grep -q 'annot.setAppearance(Rect' "$ENGINE"
+          grep -q 'Helvetica-BoldOblique' "$ENGINE"
+          grep -q 'createFreeTextOnPage(page, originalRect, text, style)' "$ENGINE"
+          grep -q 'redaction.applyRedaction' "$ENGINE"
+          grep -q 'BitmapFactory.decodeByteArray' "$ENGINE"
+          grep -q 'versionCode = 4' "$BUILD"
+          grep -q 'versionName = "0.4.0-text-engine"' "$BUILD"
+          if grep -q 'setRichContents' "$ENGINE"; then echo 'Rich-content dependency returned'; exit 1; fi
+          if grep -q 'richDefaults' "$ENGINE"; then echo 'Broken RichDefaults JNI path returned'; exit 1; fi
+          if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw-pixel renderer returned'; exit 1; fi
+          if grep -q 'page.applyRedactions' "$ENGINE"; then echo 'Page-wide redaction path returned'; exit 1; fi
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify persistent development signing key
+        shell: bash
+        run: |
+          keytool -list -keystore LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore -storepass lumapdfdev -alias lumapdf-dev
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Build LumaPDF v0.4
+        working-directory: LumaPDF_RazrFold_2026_v04
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          APK='LumaPDF_RazrFold_2026_v04/app/build/outputs/apk/debug/app-debug.apk'
+          test -f "$APK"
+          file "$APK"
+          ls -lh "$APK"
+          sha256sum "$APK" | tee LumaPDF-v040-apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v040-APK
+          path: |
+            LumaPDF_RazrFold_2026_v04/app/build/outputs/apk/debug/app-debug.apk
+            LumaPDF-v040-apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v040-Source
+          path: LumaPDF-v040-source.zip
+          if-no-files-found: error
+          retention-days: 14
