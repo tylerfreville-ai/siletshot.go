@@ -1,10 +1,10 @@
-name: Build LumaPDF APK
+name: Build LumaPDF Content Studio APK
 
 on:
   push:
     branches: [lumapdf-build]
     paths:
-      - '.lumapdf/**'
+      - '.lumapdf/v02.part*'
       - '.github/workflows/lumapdf.yml'
   workflow_dispatch:
 
@@ -14,68 +14,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct LumaPDF source
+      - name: Reconstruct LumaPDF v0.2 source
         shell: bash
         run: |
-          cat .lumapdf/source.part* | base64 --decode > lumapdf-source.zip
-          unzip -q lumapdf-source.zip
-          test -f LumaPDF_RazrFold_2026/settings.gradle.kts
+          cat .lumapdf/v02.part* | base64 --decode > lumapdf-v02.zip
+          unzip -q lumapdf-v02.zip
+          test -f LumaPDF_RazrFold_2026_v02/settings.gradle.kts
+          test -f LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
 
-      - name: Apply AndroidX PDF alpha19 compatibility fixes
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          root = Path('LumaPDF_RazrFold_2026')
-
-          build = root / 'app/build.gradle.kts'
-          s = build.read_text()
-          if 'compileSdkExtension = 19' not in s:
-              s = s.replace('compileSdk = 36', 'compileSdk = 36\n    compileSdkExtension = 19')
-          build.write_text(s)
-
-          main = root / 'app/src/main/java/com/tstudio/lumapdf/MainActivity.kt'
-          s = main.read_text().replace('fragment?.hasUnsavedChanges() == true', 'fragment?.hasUnsavedChanges == true')
-          main.write_text(s)
-
-          frag = root / 'app/src/main/java/com/tstudio/lumapdf/pdf/LumaPdfFragment.kt'
-          s = frag.read_text().replace('if (hasUnsavedChanges()) {', 'if (hasUnsavedChanges) {')
-          frag.write_text(s)
-          PY
-
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 36 extension 19
+      - name: Install Android SDK 36
         shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platform-tools' 'platforms;android-36' 'platforms;android-36-ext19' 'build-tools;36.0.0'
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.0'
 
-      - name: Build debug APK
-        working-directory: LumaPDF_RazrFold_2026
+      - name: Build content editor APK
+        working-directory: LumaPDF_RazrFold_2026_v02
         run: gradle :app:assembleDebug --stacktrace
 
       - name: Verify APK
         shell: bash
         run: |
-          APK='LumaPDF_RazrFold_2026/app/build/outputs/apk/debug/app-debug.apk'
+          APK='LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk'
           test -f "$APK"
+          file "$APK"
           ls -lh "$APK"
           sha256sum "$APK"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LumaPDF-RazrFold-APK
-          path: LumaPDF_RazrFold_2026/app/build/outputs/apk/debug/app-debug.apk
+          name: LumaPDF-ContentStudio-v02-APK
+          path: LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
