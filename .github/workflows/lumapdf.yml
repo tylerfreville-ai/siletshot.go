@@ -21,6 +21,29 @@ jobs:
           unzip -q lumapdf-source.zip
           test -f LumaPDF_RazrFold_2026/settings.gradle.kts
 
+      - name: Apply AndroidX PDF alpha19 compatibility fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('LumaPDF_RazrFold_2026')
+
+          build = root / 'app/build.gradle.kts'
+          s = build.read_text()
+          if 'compileSdkExtension = 19' not in s:
+              s = s.replace('compileSdk = 36', 'compileSdk = 36\n    compileSdkExtension = 19')
+          build.write_text(s)
+
+          main = root / 'app/src/main/java/com/tstudio/lumapdf/MainActivity.kt'
+          s = main.read_text().replace('fragment?.hasUnsavedChanges() == true', 'fragment?.hasUnsavedChanges == true')
+          main.write_text(s)
+
+          frag = root / 'app/src/main/java/com/tstudio/lumapdf/pdf/LumaPdfFragment.kt'
+          s = frag.read_text().replace('if (hasUnsavedChanges()) {', 'if (hasUnsavedChanges) {')
+          frag.write_text(s)
+          PY
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -28,11 +51,11 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 36
+      - name: Install Android SDK 36 extension 19
         shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+          sdkmanager 'platform-tools' 'platforms;android-36' 'platforms;android-36-ext19' 'build-tools;36.0.0'
 
       - uses: gradle/actions/setup-gradle@v4
         with:
