@@ -1,0 +1,179 @@
+name: Build LumaPDF v0.6 Studio Rebuild APK
+
+on:
+  push:
+    branches: [lumapdf-build]
+    paths:
+      - '.github/workflows/lumapdf-v060.yml'
+      - '.lumapdf/v060-rel.patch.gz.b64'
+      - '.lumapdf/v050.patch.gz.b64'
+      - '.lumapdf/patch_v050_compilefix.py'
+      - '.lumapdf/patch_v042.py'
+      - '.lumapdf/v023s.part*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct verified LumaPDF v0.5 base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .lumapdf/v023s.part* | base64 --decode > LumaPDF-base.zip
+          echo 'e8ffe0fe190095ed9bf652e67f13be96e5eedb86d9359cd316755a27e27bc543  LumaPDF-base.zip' | sha256sum -c -
+          unzip -tq LumaPDF-base.zip
+          unzip -q LumaPDF-base.zip
+          base64 --decode .lumapdf/lumapdf-dev.keystore.b64 > LumaPDF_RazrFold_2026_v02/app/lumapdf-dev.keystore
+          test -s LumaPDF_RazrFold_2026_v02/app/lumapdf-dev.keystore
+          python .lumapdf/patch_v042.py
+          base64 --decode .lumapdf/v050.patch.gz.b64 | gzip -dc > v050.patch
+          cd LumaPDF_RazrFold_2026_v02
+          patch --dry-run -p1 < ../v050.patch
+          patch -p1 < ../v050.patch
+          cd ..
+          python .lumapdf/patch_v050_compilefix.py
+          grep -Fq 'versionName = "0.5.0-direct-manipulation"' LumaPDF_RazrFold_2026_v02/app/build.gradle.kts
+
+      - name: Apply verified v0.6 studio rebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'c8d0d290737c7a67e3206dd4b2a4353fc7d33149219a75387e0bbc7759ff2a39  .lumapdf/v060-rel.patch.gz.b64' | sha256sum -c -
+          base64 --decode .lumapdf/v060-rel.patch.gz.b64 | gzip -dc > v060.patch
+          echo '948d5240f259b1f6aa7f5f9ae81483f3cfea4ffa63e03e938ed8d8ad57f4ea1a  v060.patch' | sha256sum -c -
+          cd LumaPDF_RazrFold_2026_v02
+          patch --dry-run -p2 < ../v060.patch
+          patch -p2 < ../v060.patch
+
+      - name: v0.6 architecture and regression guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT='LumaPDF_RazrFold_2026_v02'
+          ENGINE="$ROOT/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt"
+          CANVAS="$ROOT/app/src/main/java/com/tstudio/lumapdf/editor/PageCanvasView.kt"
+          MAIN="$ROOT/app/src/main/java/com/tstudio/lumapdf/MainActivity.kt"
+          UI="$ROOT/app/src/main/java/com/tstudio/lumapdf/ui/UiKit.kt"
+          BUILD="$ROOT/app/build.gradle.kts"
+
+          require_literal() {
+            local file="$1"; local text="$2"; local label="$3"
+            if grep -Fq -- "$text" "$file"; then echo "PASS: $label"; else
+              echo "FAIL: $label"; echo "Expected literal: $text"; echo "File: $file"; exit 1
+            fi
+          }
+          forbid_literal() {
+            local file="$1"; local text="$2"; local label="$3"
+            if grep -Fq -- "$text" "$file"; then
+              echo "FAIL: forbidden $label returned"; grep -Fn -- "$text" "$file" || true; exit 1
+            else echo "PASS: $label absent"; fi
+          }
+
+          require_literal "$BUILD" 'versionCode = 7' 'v0.6 version code'
+          require_literal "$BUILD" 'versionName = "0.6.0-studio-rebuild"' 'v0.6 version name'
+          require_literal "$ENGINE" 'fun renderVisual' 'isolated first-paint renderer'
+          require_literal "$ENGINE" 'fun analyzePage' 'fault-isolated object analysis'
+          require_literal "$ENGINE" 'fun insertPdf' 'insert pages from another PDF'
+          require_literal "$ENGINE" 'fun extractPage' 'extract page to PDF'
+          require_literal "$ENGINE" 'verifySavedText(out)' 'save/reopen text persistence verifier'
+          require_literal "$MAIN" 'renderGeneration' 'stale render generation guard'
+          require_literal "$MAIN" 'showCanvasState' 'explicit canvas loading/error state'
+          require_literal "$MAIN" 'UiKit.commandButton(this, "Undo")' 'labeled Undo command'
+          require_literal "$MAIN" 'UiKit.commandButton(this, "Redo")' 'labeled Redo command'
+          require_literal "$MAIN" 'UiKit.commandButton(this, "Save"' 'labeled Save command'
+          require_literal "$MAIN" 'updateSelectionUi()' 'selection-aware action state'
+          require_literal "$MAIN" 'FoldPosture.BOOK' 'book posture layout'
+          require_literal "$MAIN" 'FoldPosture.TABLETOP' 'tabletop posture layout'
+          require_literal "$MAIN" 'FoldPosture.FLAT_EXPANDED' 'expanded posture layout'
+          require_literal "$CANVAS" 'ScaleGestureDetector' 'pinch zoom'
+          require_literal "$CANVAS" 'MAX_ZOOM = 6f' '6x zoom ceiling'
+          require_literal "$CANVAS" 'fun fitWidth' 'fit-width command'
+          require_literal "$UI" 'fun commandButton' 'explicit command control component'
+          require_literal "$UI" 'require(label.isNotBlank())' 'blank-control prevention'
+          require_literal "$ROOT/V06_BUILD_NOTES.md" 'Render-first architecture' 'v0.6 architecture notes'
+
+          forbid_literal "$MAIN" 'MaterialButton' 'MaterialButton editor shell dependency'
+          forbid_literal "$ENGINE" 'TYPE_FREE_TEXT' 'FreeText text editing path'
+          forbid_literal "$ENGINE" 'doc.bake(true, false)' 'save-time annotation bake'
+          forbid_literal "$ENGINE" 'bitmap.setPixels' 'unsafe raw-pixel renderer'
+
+          # Primary commands must have visible labels rather than icon-only glyphs.
+          grep -Fq '"Library"' "$MAIN"
+          grep -Fq '"Undo"' "$MAIN"
+          grep -Fq '"Redo"' "$MAIN"
+          grep -Fq '"Save"' "$MAIN"
+          grep -Fq '"Previous"' "$MAIN"
+          grep -Fq '"Next"' "$MAIN"
+          echo 'PASS: labeled primary command set'
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify stable LumaPDF signing key
+        shell: bash
+        run: keytool -list -keystore LumaPDF_RazrFold_2026_v02/app/lumapdf-dev.keystore -storepass lumapdfdev -alias lumapdf-dev
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Compile LumaPDF v0.6
+        working-directory: LumaPDF_RazrFold_2026_v02
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK structure and identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          file "$APK"
+          unzip -tq "$APK"
+          unzip -l "$APK" | grep -Fq 'lib/arm64-v8a/libmupdf_java.so'
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | tee LumaPDF-v060-badging.txt
+          grep -Fq "versionCode='7'" LumaPDF-v060-badging.txt
+          grep -Fq "versionName='0.6.0-studio-rebuild'" LumaPDF-v060-badging.txt
+          ls -lh "$APK"
+          sha256sum "$APK" | tee LumaPDF-v060-apk.sha256
+
+      - name: Package matching source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf LumaPDF_RazrFold_2026_v02/.gradle LumaPDF_RazrFold_2026_v02/.kotlin LumaPDF_RazrFold_2026_v02/app/build
+          zip -qr LumaPDF-v060-source.zip LumaPDF_RazrFold_2026_v02
+          unzip -tq LumaPDF-v060-source.zip
+          sha256sum LumaPDF-v060-source.zip | tee LumaPDF-v060-source.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v060-APK
+          path: |
+            LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk
+            LumaPDF-v060-apk.sha256
+            LumaPDF-v060-badging.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v060-Source
+          path: |
+            LumaPDF-v060-source.zip
+            LumaPDF-v060-source.sha256
+          if-no-files-found: error
+          retention-days: 14
