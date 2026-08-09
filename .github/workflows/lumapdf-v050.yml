@@ -1,0 +1,147 @@
+name: Build LumaPDF v0.5 Direct Manipulation APK
+
+on:
+  push:
+    branches: [lumapdf-build]
+    paths:
+      - '.github/workflows/lumapdf-v050.yml'
+      - '.lumapdf/v050.patch.gz.b64'
+      - '.lumapdf/patch_v042.py'
+      - '.lumapdf/v023s.part*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct verified LumaPDF base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .lumapdf/v023s.part* | base64 --decode > LumaPDF-base.zip
+          echo 'e8ffe0fe190095ed9bf652e67f13be96e5eedb86d9359cd316755a27e27bc543  LumaPDF-base.zip' | sha256sum -c -
+          unzip -tq LumaPDF-base.zip
+          unzip -q LumaPDF-base.zip
+          base64 --decode .lumapdf/lumapdf-dev.keystore.b64 > LumaPDF_RazrFold_2026_v02/app/lumapdf-dev.keystore
+          test -s LumaPDF_RazrFold_2026_v02/app/lumapdf-dev.keystore
+
+      - name: Apply v0.4.2 persistent text foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .lumapdf/patch_v042.py
+
+      - name: Apply v0.5 direct manipulation patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .lumapdf/v050.patch.gz.b64 | gzip -dc > v050.patch
+          cd LumaPDF_RazrFold_2026_v02
+          git apply ../v050.patch
+
+      - name: Direct manipulation regression guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT='LumaPDF_RazrFold_2026_v02'
+          ENGINE="$ROOT/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt"
+          CANVAS="$ROOT/app/src/main/java/com/tstudio/lumapdf/editor/PageCanvasView.kt"
+          MAIN="$ROOT/app/src/main/java/com/tstudio/lumapdf/MainActivity.kt"
+          BUILD="$ROOT/app/build.gradle.kts"
+
+          grep -q 'versionCode = 6' "$BUILD"
+          grep -q 'versionName = "0.5.0-direct-manipulation"' "$BUILD"
+          grep -q 'ScaleGestureDetector' "$CANVAS"
+          grep -q 'MAX_ZOOM = 6f' "$CANVAS"
+          grep -q 'fun onTextMoved' "$CANVAS"
+          grep -q 'fun onImageTransformed' "$CANVAS"
+          grep -q 'private fun resizeRect' "$CANVAS"
+          grep -q 'private fun translatedInside' "$CANVAS"
+          grep -q 'fun moveText' "$ENGINE"
+          grep -q 'fun deleteText' "$ENGINE"
+          grep -q 'fun duplicateText' "$ENGINE"
+          grep -q 'fun addTextMarkup' "$ENGINE"
+          grep -q 'fun moveImage' "$ENGINE"
+          grep -q 'fun duplicateImage' "$ENGINE"
+          grep -q 'fun movePage' "$ENGINE"
+          grep -q 'fun duplicatePage' "$ENGINE"
+          grep -q 'fun insertBlankPage' "$ENGINE"
+          grep -q 'doc.rearrangePages' "$ENGINE"
+          grep -q 'appendPageText(doc, page, newRect' "$ENGINE"
+          grep -q 'redaction.applyRedaction' "$ENGINE"
+          grep -q 'verifySavedText(out)' "$ENGINE"
+          grep -q 'showZoomMenu' "$MAIN"
+          grep -q 'duplicateSelection' "$MAIN"
+          grep -q 'deleteSelection' "$MAIN"
+          grep -q 'showMarkupMenu' "$MAIN"
+          if grep -q 'TYPE_FREE_TEXT' "$ENGINE"; then echo 'FreeText text editing returned'; exit 1; fi
+          if grep -q 'doc.bake(true, false)' "$ENGINE"; then echo 'Save-time bake returned'; exit 1; fi
+          if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw-pixel renderer returned'; exit 1; fi
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify stable LumaPDF signing key
+        shell: bash
+        run: keytool -list -keystore LumaPDF_RazrFold_2026_v02/app/lumapdf-dev.keystore -storepass lumapdfdev -alias lumapdf-dev
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Compile LumaPDF v0.5
+        working-directory: LumaPDF_RazrFold_2026_v02
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk'
+          test -f "$APK"
+          file "$APK"
+          unzip -tq "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmupdf_java.so'
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | tee LumaPDF-v050-badging.txt
+          grep -q "versionName='0.5.0-direct-manipulation'" LumaPDF-v050-badging.txt
+          ls -lh "$APK"
+          sha256sum "$APK" | tee LumaPDF-v050-apk.sha256
+
+      - name: Package matching source
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip -qr LumaPDF-v050-source.zip LumaPDF_RazrFold_2026_v02
+          unzip -tq LumaPDF-v050-source.zip
+          sha256sum LumaPDF-v050-source.zip | tee LumaPDF-v050-source.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v050-APK
+          path: |
+            LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk
+            LumaPDF-v050-apk.sha256
+            LumaPDF-v050-badging.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v050-Source
+          path: |
+            LumaPDF-v050-source.zip
+            LumaPDF-v050-source.sha256
+          if-no-files-found: error
+          retention-days: 14
