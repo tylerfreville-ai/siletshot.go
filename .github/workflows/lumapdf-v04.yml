@@ -4,7 +4,9 @@ on:
   push:
     branches: [lumapdf-build]
     paths:
-      - '.lumapdf/v04source.part*'
+      - '.lumapdf/v023s.part*'
+      - '.lumapdf/engine_v041.gz.b64'
+      - '.lumapdf/lumapdf-dev.keystore.b64'
       - '.github/workflows/lumapdf-v04.yml'
   workflow_dispatch:
 
@@ -14,34 +16,123 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct v0.4 source
+      - name: Reconstruct verified base and inject v0.4.1 engine
         shell: bash
         run: |
-          cat .lumapdf/v04source.part* | base64 --decode > LumaPDF-v040-source.zip
-          echo '25602533d090916b991e0b30d8df7cee9d11979a66bb050fcc4063ae64514c9b  LumaPDF-v040-source.zip' | sha256sum -c -
-          unzip -q LumaPDF-v040-source.zip
-          test -f LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
-          test -f LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore
+          set -euo pipefail
+          cat .lumapdf/v023s.part* | base64 --decode > LumaPDF-base.zip
+          echo 'e8ffe0fe190095ed9bf652e67f13be96e5eedb86d9359cd316755a27e27bc543  LumaPDF-base.zip' | sha256sum -c -
+          unzip -tq LumaPDF-base.zip
+          unzip -q LumaPDF-base.zip
+          mv LumaPDF_RazrFold_2026_v02 LumaPDF_RazrFold_2026_v04
 
-      - name: Text-engine regression guards
+          base64 --decode .lumapdf/engine_v041.gz.b64 | gzip -dc > /tmp/MuPdfEngine.kt
+          echo 'b9e2a2881b8816dbc559ec112633ead891c351f7b132543fcc30f0582bd3fc7a  /tmp/MuPdfEngine.kt' | sha256sum -c -
+          cp /tmp/MuPdfEngine.kt LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
+
+          base64 --decode .lumapdf/lumapdf-dev.keystore.b64 > LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore
+          test -s LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore
+
+      - name: Apply renderer UI and signing fixes
         shell: bash
         run: |
+          python - <<'PY'
+          from pathlib import Path
+          root = Path('LumaPDF_RazrFold_2026_v04')
+          base = root / 'app/src/main/java/com/tstudio/lumapdf'
+
+          # On any failed native mutation, immediately re-render the rolled-back state.
+          p = base / 'MainActivity.kt'
+          s = p.read_text()
+          s = s.replace(
+              '}.onFailure { toast(it.message ?: "Could not render this page.") }',
+              '}.onFailure {\n                statusView?.text = "Could not render page ${currentPage + 1}"\n                toast(it.message ?: "Could not render this page.")\n            }'
+          )
+          s = s.replace(
+              'result.onSuccess { renderCurrentPage() }.onFailure { toast(it.message ?: "$label failed") }',
+              'result.onSuccess { renderCurrentPage() }.onFailure {\n                renderCurrentPage()\n                toast(it.message ?: "$label failed")\n            }'
+          )
+          p.write_text(s)
+
+          # Always display PDFs on opaque white paper. Keep selection hit testing, but
+          # only outline the tapped object rather than every text block on the page.
+          p = base / 'editor/PageCanvasView.kt'
+          s = p.read_text()
+          s = s.replace(
+              'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n',
+              'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n    private val pageBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }\n'
+          )
+          s = s.replace(
+              'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)',
+              'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawRect(dst, pageBackgroundPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)'
+          )
+          s = s.replace(
+              'if (mode == Mode.SELECT) {\n            s.textObjects.forEach { canvas.drawRect(toScreen(it.rect), editHintPaint) }\n        }\n',
+              '// Select mode keeps invisible hit targets; only the tapped object is outlined.\n'
+          )
+          p.write_text(s)
+
+          # Stable development signing from this version forward.
+          p = root / 'app/build.gradle.kts'
+          s = p.read_text().replace('versionName = "0.2.3-content-text"', 'versionName = "0.4.0-text-engine"')
+          marker = '''    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
+          signing = '''    signingConfigs {\n        create("lumaDev") {\n            storeFile = file("lumapdf-dev.keystore")\n            storePassword = "lumapdfdev"\n            keyAlias = "lumapdf-dev"\n            keyPassword = "lumapdfdev"\n        }\n    }\n\n    buildTypes {\n        getByName("debug") {\n            signingConfig = signingConfigs.getByName("lumaDev")\n        }\n    }\n\n    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
+          if 'signingConfigs {' not in s:
+              if marker not in s:
+                  raise SystemExit('buildFeatures marker not found')
+              s = s.replace(marker, signing)
+          p.write_text(s)
+          PY
+
+      - name: Runtime and editing regression guards
+        shell: bash
+        run: |
+          set -euo pipefail
           ENGINE='LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
+          CANVAS='LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/PageCanvasView.kt'
+          MAIN='LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/MainActivity.kt'
           BUILD='LumaPDF_RazrFold_2026_v04/app/build.gradle.kts'
+
+          # Existing edits remain discoverable/editable after rendering/reload.
           grep -q 'annotationObjectNumber' "$ENGINE"
           grep -q 'page.getAnnotations()' "$ENGINE"
+
+          # Text replacement gets an explicit appearance stream and real PDF font resource.
           grep -q 'setExplicitTextAppearance' "$ENGINE"
           grep -q 'annot.setAppearance(Rect' "$ENGINE"
+          grep -q 'doc.addSimpleFont' "$ENGINE"
+          grep -q 'doc.addStream' "$ENGINE"
           grep -q 'Helvetica-BoldOblique' "$ENGINE"
           grep -q 'createFreeTextOnPage(page, originalRect, text, style)' "$ENGINE"
+
+          # Destructive edits are object-local and journal protected.
           grep -q 'redaction.applyRedaction' "$ENGINE"
+          grep -q 'doc.abandonOperation()' "$ENGINE"
+
+          # Rendering is PNG decoded, not unsafe raw packed integer pixels.
+          grep -q 'pix.asPNG()' "$ENGINE"
           grep -q 'BitmapFactory.decodeByteArray' "$ENGINE"
+          grep -q 'pageBackgroundPaint' "$CANVAS"
+
+          # Existing source text color remains the initial edit swatch.
+          grep -q 'add(existing?.argb ?: Color.BLACK)' "$MAIN"
+
           grep -q 'versionCode = 4' "$BUILD"
           grep -q 'versionName = "0.4.0-text-engine"' "$BUILD"
-          if grep -q 'setRichContents' "$ENGINE"; then echo 'Rich-content dependency returned'; exit 1; fi
-          if grep -q 'richDefaults' "$ENGINE"; then echo 'Broken RichDefaults JNI path returned'; exit 1; fi
+          grep -q 'signingConfig = signingConfigs.getByName("lumaDev")' "$BUILD"
+
+          if grep -q 'setRichContents' "$ENGINE"; then echo 'Unsafe rich-content path returned'; exit 1; fi
+          if grep -q 'richDefaults' "$ENGINE"; then echo 'Broken setRichDefaults JNI path returned'; exit 1; fi
           if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw-pixel renderer returned'; exit 1; fi
           if grep -q 'page.applyRedactions' "$ENGINE"; then echo 'Page-wide redaction path returned'; exit 1; fi
+
+      - name: Package exact source used by CI
+        shell: bash
+        run: |
+          rm -f LumaPDF-v040-source.zip
+          zip -qr LumaPDF-v040-source.zip LumaPDF_RazrFold_2026_v04
+          unzip -tq LumaPDF-v040-source.zip
+          sha256sum LumaPDF-v040-source.zip | tee LumaPDF-v040-source.sha256
 
       - uses: actions/setup-java@v5
         with:
@@ -69,12 +160,15 @@ jobs:
         working-directory: LumaPDF_RazrFold_2026_v04
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify APK
+      - name: Verify APK and native package
         shell: bash
         run: |
+          set -euo pipefail
           APK='LumaPDF_RazrFold_2026_v04/app/build/outputs/apk/debug/app-debug.apk'
           test -f "$APK"
           file "$APK"
+          unzip -tq "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmupdf_java.so'
           ls -lh "$APK"
           sha256sum "$APK" | tee LumaPDF-v040-apk.sha256
 
@@ -90,6 +184,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: LumaPDF-ContentStudio-v040-Source
-          path: LumaPDF-v040-source.zip
+          path: |
+            LumaPDF-v040-source.zip
+            LumaPDF-v040-source.sha256
           if-no-files-found: error
           retention-days: 14
