@@ -22,7 +22,7 @@ jobs:
           test -f LumaPDF_RazrFold_2026_v02/settings.gradle.kts
           test -f LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
 
-      - name: Apply compiler fixes
+      - name: Apply compiler and renderer fixes
         shell: bash
         run: |
           python - <<'PY'
@@ -36,8 +36,11 @@ jobs:
           s = s.replace('engine.replaceImage(currentPage, obj, bytes)', 'engine.replaceImage(currentPage, obj, imageBytes)')
           s = s.replace('showInsertImageDialog(bytes)', 'showInsertImageDialog(imageBytes)')
           p.write_text(s)
+
           p = base / 'editor' / 'MuPdfEngine.kt'
-          s = p.read_text().replace('val obj = page.object', 'val obj = page.getObject()')
+          s = p.read_text()
+          s = s.replace('val obj = page.object', 'val obj = page.getObject()')
+          s = s.replace('page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")', 'page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, true, true, "View")')
           p.write_text(s)
           PY
 
@@ -73,7 +76,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LumaPDF-ContentStudio-v02-APK
+          name: LumaPDF-ContentStudio-v021-APK
           path: LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
