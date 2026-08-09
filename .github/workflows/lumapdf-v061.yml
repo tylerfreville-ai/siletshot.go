@@ -53,7 +53,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'f1e9b57f88e7fcdac58f5dd48b4e2e245647a9516bf41102fe765285a2aa0b9f  .lumapdf/v061.patch.gz.b64' | sha256sum -c -
           base64 --decode .lumapdf/v061.patch.gz.b64 | gzip -dc > v061.patch
           echo '35cced2699e034aeb47df61ad7521bbf93e4d92bd1a20dd8d0ef4c753ab92f7b  v061.patch' | sha256sum -c -
           cd LumaPDF_RazrFold_2026_v02
