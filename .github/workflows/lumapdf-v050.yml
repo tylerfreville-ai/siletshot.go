@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/lumapdf-v050.yml'
       - '.lumapdf/v050.patch.gz.b64'
+      - '.lumapdf/patch_v050_compilefix.py'
       - '.lumapdf/patch_v042.py'
       - '.lumapdf/v023s.part*'
   workflow_dispatch:
@@ -41,6 +42,8 @@ jobs:
           cd LumaPDF_RazrFold_2026_v02
           patch --dry-run -p1 < ../v050.patch
           patch -p1 < ../v050.patch
+          cd ..
+          python .lumapdf/patch_v050_compilefix.py
 
       - name: Direct manipulation regression guards
         shell: bash
@@ -90,6 +93,8 @@ jobs:
           require_literal "$MAIN" 'duplicateSelection' 'duplicate selection UI'
           require_literal "$MAIN" 'deleteSelection' 'delete selection UI'
           require_literal "$MAIN" 'showMarkupMenu' 'markup selection UI'
+          require_literal "$MAIN" 'private var zoomButton: LinearLayout? = null' 'zoom tile type fix'
+          require_literal "$MAIN" 'fun addTool(glyph: String, label: String, action: () -> Unit): LinearLayout =' 'toolbar tile type fix'
           forbid_literal "$ENGINE" 'TYPE_FREE_TEXT' 'FreeText text editing path'
           forbid_literal "$ENGINE" 'doc.bake(true, false)' 'save-time annotation bake'
           forbid_literal "$ENGINE" 'bitmap.setPixels' 'unsafe raw-pixel renderer'
