@@ -22,12 +22,14 @@ jobs:
           test -f LumaPDF_RazrFold_2026_v02/settings.gradle.kts
           test -f LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
 
-      - name: Apply compiler and renderer fixes
+      - name: Apply v0.2.2 stability fixes
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
           base = Path('LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf')
+
+          # Compiler fixes retained from the previous successful build.
           p = base / 'MainActivity.kt'
           s = p.read_text()
           s = s.replace('private fun showTextEditor(existing: MuPdfEngine.TextObject?, targetRect: Rect = existing?.rect ?: return) {\n        val p = UiKit.palette(this)', 'private fun showTextEditor(existing: MuPdfEngine.TextObject?, targetRect: Rect? = existing?.rect) {\n        val resolvedRect = targetRect ?: return\n        val p = UiKit.palette(this)')
@@ -39,10 +41,35 @@ jobs:
 
           p = base / 'editor' / 'MuPdfEngine.kt'
           s = p.read_text()
+          s = s.replace('import android.graphics.Bitmap\n', 'import android.graphics.Bitmap\nimport android.graphics.BitmapFactory\n')
           s = s.replace('val obj = page.object', 'val obj = page.getObject()')
-          s = s.replace('page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")', 'page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, true, true, "View")')
+
+          old_render = '''            val pix = page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")\n            val bitmap = Bitmap.createBitmap(pix.width, pix.height, Bitmap.Config.ARGB_8888)\n            bitmap.setPixels(pix.pixels, 0, pix.width, 0, 0, pix.width, pix.height)\n            pix.destroy()\n'''
+          new_render = '''            // Render as opaque DeviceRGB, encode through MuPDF, then let Android decode PNG.\n            // This avoids RGBA/BGRA integer packing assumptions and preserves PDF page colors.\n            val pix = page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")\n            val bitmap = try {\n                val png = pix.asPNG()\n                try {\n                    val bytes = png.asByteArray()\n                    requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size)) {\n                        "Unable to decode rendered PDF page."\n                    }\n                } finally {\n                    png.destroy()\n                }\n            } finally {\n                pix.destroy()\n            }\n'''
+          if old_render not in s:
+              raise SystemExit('Expected raw render block was not found')
+          s = s.replace(old_render, new_render)
+
+          old_rich = '''                annot.richDefaults = css\n                annot.contents = text\n                val escaped = escapeHtml(text).replace("\\n", "<br/>")\n                val rich = "<body><p><span style=\\"$css\\">$escaped</span></p></body>"\n                runCatching { annot.setRichContents(text, rich) }\n                annot.update()\n'''
+          new_rich = '''                // Commit plain replacement text first. MuPDF 1.28 Java declares setRichDefaults(),\n                // but the shipped JNI symbol is setRichDefault(), so richDefaults crashes at runtime.\n                annot.contents = text\n                val escaped = escapeHtml(text).replace("\\n", "<br/>")\n                val rich = "<body><p><span style=\\"$css\\">$escaped</span></p></body>"\n                runCatching { annot.setRichContents(text, rich) }\n                annot.update()\n'''
+          if old_rich not in s:
+              raise SystemExit('Expected rich-text block was not found')
+          s = s.replace(old_rich, new_rich)
+          p.write_text(s)
+
+          # Distinguish this fixed APK from prior test builds.
+          p = Path('LumaPDF_RazrFold_2026_v02/app/build.gradle.kts')
+          s = p.read_text().replace('versionCode = 2', 'versionCode = 3').replace('versionName = "0.2.0-content-studio"', 'versionName = "0.2.2-stability-fix"')
           p.write_text(s)
           PY
+
+      - name: Regression guards
+        shell: bash
+        run: |
+          ENGINE='LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
+          grep -q 'BitmapFactory.decodeByteArray' "$ENGINE"
+          if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw pixel renderer returned'; exit 1; fi
+          if grep -q 'annot.richDefaults' "$ENGINE"; then echo 'Broken MuPDF richDefaults JNI call returned'; exit 1; fi
 
       - uses: actions/setup-java@v5
         with:
@@ -76,7 +103,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LumaPDF-ContentStudio-v021-APK
+          name: LumaPDF-ContentStudio-v022-APK
           path: LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
