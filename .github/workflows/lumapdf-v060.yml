@@ -101,7 +101,6 @@ jobs:
           forbid_literal "$ENGINE" 'doc.bake(true, false)' 'save-time annotation bake'
           forbid_literal "$ENGINE" 'bitmap.setPixels' 'unsafe raw-pixel renderer'
 
-          # Primary commands must have visible labels rather than icon-only glyphs.
           grep -Fq '"Library"' "$MAIN"
           grep -Fq '"Undo"' "$MAIN"
           grep -Fq '"Redo"' "$MAIN"
@@ -135,7 +134,7 @@ jobs:
         working-directory: LumaPDF_RazrFold_2026_v02
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify APK structure and identity
+      - name: Verify and stage APK
         shell: bash
         run: |
           set -euo pipefail
@@ -147,8 +146,10 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | tee LumaPDF-v060-badging.txt
           grep -Fq "versionCode='7'" LumaPDF-v060-badging.txt
           grep -Fq "versionName='0.6.0-studio-rebuild'" LumaPDF-v060-badging.txt
-          ls -lh "$APK"
-          sha256sum "$APK" | tee LumaPDF-v060-apk.sha256
+          cp "$APK" LumaPDF-v060.apk
+          test -s LumaPDF-v060.apk
+          ls -lh LumaPDF-v060.apk
+          sha256sum LumaPDF-v060.apk | tee LumaPDF-v060-apk.sha256
 
       - name: Package matching source
         shell: bash
@@ -163,7 +164,7 @@ jobs:
         with:
           name: LumaPDF-ContentStudio-v060-APK
           path: |
-            LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk
+            LumaPDF-v060.apk
             LumaPDF-v060-apk.sha256
             LumaPDF-v060-badging.txt
           if-no-files-found: error
