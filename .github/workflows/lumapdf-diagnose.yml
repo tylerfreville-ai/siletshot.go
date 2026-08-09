@@ -23,6 +23,8 @@ jobs:
           OLD='/tmp/v023/LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
           echo '=== CURRENT v0.4.1 persistence ==='
           grep -nE 'fun (saveAs|replacePageText|createFreeTextOnPage|setExplicitTextAppearance)|doc.bake|setAppearance' /tmp/current.kt || true
+          echo '=== DIRECT CONTENT call path ==='
+          sed -n '175,240p' "$OLD"
           echo '=== DIRECT CONTENT implementation ==='
           grep -nE 'fun (saveAs|replacePageText|appendPageText|appendContentStream)|addSimpleFont|addStream|Contents|Resources' "$OLD" || true
           echo '=== DIRECT CONTENT code blocks ==='
