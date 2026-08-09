@@ -1,0 +1,283 @@
+name: Build LumaPDF v0.4.2 Direct Text APK
+
+on:
+  push:
+    branches: [lumapdf-build]
+    paths:
+      - '.github/workflows/lumapdf-v042.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct verified direct-content base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .lumapdf/v023s.part* | base64 --decode > LumaPDF-base.zip
+          echo 'e8ffe0fe190095ed9bf652e67f13be96e5eedb86d9359cd316755a27e27bc543  LumaPDF-base.zip' | sha256sum -c -
+          unzip -tq LumaPDF-base.zip
+          unzip -q LumaPDF-base.zip
+          mv LumaPDF_RazrFold_2026_v02 LumaPDF_RazrFold_2026_v042
+          base64 --decode .lumapdf/lumapdf-dev.keystore.b64 > LumaPDF_RazrFold_2026_v042/app/lumapdf-dev.keystore
+          test -s LumaPDF_RazrFold_2026_v042/app/lumapdf-dev.keystore
+
+      - name: Apply v0.4.2 persistence and rendering fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('LumaPDF_RazrFold_2026_v042')
+          base = root / 'app/src/main/java/com/tstudio/lumapdf'
+          engine = base / 'editor/MuPdfEngine.kt'
+          s = engine.read_text()
+
+          # 1) Text replacement stays in the real page /Contents stream.
+          if 'private fun appendPageText' not in s or 'appendContentStream(doc, pageObject' not in s:
+              raise SystemExit('Direct page-content text engine not present')
+
+          # 2) Apply only the redaction annotation created for this edit instead of all redactions on the page.
+          old = '''                    page.applyRedactions(
+                        false,
+                        PDFPage.REDACT_IMAGE_NONE,
+                        PDFPage.REDACT_LINE_ART_NONE,
+                        PDFPage.REDACT_TEXT_REMOVE,
+                    )'''
+          new = '''                    require(redaction.applyRedaction(
+                        false,
+                        PDFPage.REDACT_IMAGE_NONE,
+                        PDFPage.REDACT_LINE_ART_NONE,
+                        PDFPage.REDACT_TEXT_REMOVE,
+                    )) { "Could not remove the original text from this PDF." }'''
+          if old not in s:
+              raise SystemExit('Text redaction marker not found')
+          s = s.replace(old, new, 1)
+
+          old = '''                page.applyRedactions(
+                    false,
+                    PDFPage.REDACT_IMAGE_REMOVE,
+                    PDFPage.REDACT_LINE_ART_NONE,
+                    PDFPage.REDACT_TEXT_NONE,
+                )'''
+          new = '''                require(redaction.applyRedaction(
+                    false,
+                    PDFPage.REDACT_IMAGE_REMOVE,
+                    PDFPage.REDACT_LINE_ART_NONE,
+                    PDFPage.REDACT_TEXT_NONE,
+                )) { "Could not remove the selected image from this PDF." }'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          s = s.replace(
+              'page.applyRedactions(false, PDFPage.REDACT_IMAGE_REMOVE, PDFPage.REDACT_LINE_ART_NONE, PDFPage.REDACT_TEXT_NONE)',
+              'require(redaction.applyRedaction(false, PDFPage.REDACT_IMAGE_REMOVE, PDFPage.REDACT_LINE_ART_NONE, PDFPage.REDACT_TEXT_NONE)) { "Could not replace the selected image." }'
+          )
+
+          # 3) Track edited text so Save As can verify the serialized PDF by reopening it.
+          marker = 'private var document: PDFDocument? = null'
+          if marker not in s:
+              raise SystemExit('document field marker not found')
+          s = s.replace(marker, marker + '\n    private val pendingTextChecks = mutableListOf<Pair<Int, String>>()', 1)
+
+          pattern = r'(private fun editTextAt\(.*?\n.*?            doc\.endOperation\(\))'
+          replacement = r'\1\n            if (text.isNotBlank()) pendingTextChecks += pageIndex to sanitizePdfText(text)'
+          s2, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'Could not install edit persistence probe: {n}')
+          s = s2
+
+          # 4) Saving no longer bakes every annotation into the whole document. Direct text is already
+          # page content, and normal PDF annotations/images/ink are valid persisted PDF objects.
+          old_save = '''        // Bake our text/image/ink annotations into real page content while preserving form widgets.
+        doc.bake(true, false)
+        doc.save(out.absolutePath, "garbage=4,compress,compress-images")'''
+          new_save = '''        // Text edits are already real page content. Preserve annotations/forms as PDF objects
+        // instead of destructively baking the whole document during every Save As.
+        doc.save(out.absolutePath, "garbage=2,compress,compress-images")
+        verifySavedText(out)'''
+          if old_save not in s:
+              raise SystemExit('save/bake marker not found')
+          s = s.replace(old_save, new_save, 1)
+
+          verify_fn = '''
+    private fun verifySavedText(file: File) {
+        if (pendingTextChecks.isEmpty()) return
+        val checkDoc = Document.openDocument(file.absolutePath).asPDF()
+        try {
+            pendingTextChecks.distinct().forEach { (pageIndex, rawText) ->
+                val probes = rawText
+                    .lineSequence()
+                    .map { it.trim() }
+                    .filter { it.length >= 2 }
+                    .take(4)
+                    .toList()
+                if (probes.isEmpty()) return@forEach
+                val page = checkDoc.loadPage(pageIndex)
+                try {
+                    probes.forEach { probe ->
+                        require(page.search(probe).isNotEmpty()) {
+                            "Save verification failed: edited text did not survive PDF serialization."
+                        }
+                    }
+                } finally {
+                    page.destroy()
+                }
+            }
+        } finally {
+            checkDoc.destroy()
+        }
+    }
+
+'''
+          close_marker = '    fun close() {'
+          if close_marker not in s:
+              raise SystemExit('close marker not found')
+          s = s.replace(close_marker, verify_fn + close_marker, 1)
+          s = s.replace('        out.delete()\n    }', '        pendingTextChecks.clear()\n        out.delete()\n    }', 1)
+          engine.write_text(s)
+
+          # 5) Opaque-white PDF paper and no wall of text detection boxes.
+          canvas = base / 'editor/PageCanvasView.kt'
+          c = canvas.read_text()
+          if 'pageBackgroundPaint' not in c:
+              c = c.replace(
+                  'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n',
+                  'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n    private val pageBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }\n'
+              )
+              c = c.replace(
+                  'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)',
+                  'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawRect(dst, pageBackgroundPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)'
+              )
+          c = c.replace(
+              'if (mode == Mode.SELECT) {\n            s.textObjects.forEach { canvas.drawRect(toScreen(it.rect), editHintPaint) }\n        }\n',
+              '// Select mode uses invisible hit targets; only the tapped object is outlined.\n'
+          )
+          canvas.write_text(c)
+
+          # 6) Preserve existing source text color as the first/default swatch when editing.
+          main = base / 'MainActivity.kt'
+          m = main.read_text()
+          if 'add(existing?.argb ?: Color.BLACK)' not in m:
+              # Older base used a fixed list. Add the detected color to the front if the marker exists.
+              m = m.replace(
+                  'val colors = listOf(',
+                  'val colors = buildList {\n            add(existing?.argb ?: Color.BLACK)\n            addAll(listOf(',
+                  1
+              )
+              # Close buildList only if we performed the conversion.
+              if 'val colors = buildList {' in m:
+                  m = m.replace('            Color.WHITE,\n        )', '            Color.WHITE,\n        ))\n        }', 1)
+          # Re-render rolled-back state after failed mutation.
+          m = m.replace(
+              'result.onSuccess { renderCurrentPage() }.onFailure { toast(it.message ?: "$label failed") }',
+              'result.onSuccess { renderCurrentPage() }.onFailure {\n                renderCurrentPage()\n                toast(it.message ?: "$label failed")\n            }'
+          )
+          main.write_text(m)
+
+          # 7) Version and stable development signature.
+          build = root / 'app/build.gradle.kts'
+          b = build.read_text()
+          b = re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 5', b, count=1)
+          b = re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "0.4.2-direct-text"', b, count=1)
+          feature_marker = '''    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
+          signing = '''    signingConfigs {\n        create("lumaDev") {\n            storeFile = file("lumapdf-dev.keystore")\n            storePassword = "lumapdfdev"\n            keyAlias = "lumapdf-dev"\n            keyPassword = "lumapdfdev"\n        }\n    }\n\n    buildTypes {\n        getByName("debug") {\n            signingConfig = signingConfigs.getByName("lumaDev")\n        }\n    }\n\n    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
+          if 'signingConfigs {' not in b:
+              if feature_marker not in b:
+                  raise SystemExit('buildFeatures marker not found')
+              b = b.replace(feature_marker, signing, 1)
+          build.write_text(b)
+          PY
+
+      - name: Direct-text regression guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE='LumaPDF_RazrFold_2026_v042/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
+          CANVAS='LumaPDF_RazrFold_2026_v042/app/src/main/java/com/tstudio/lumapdf/editor/PageCanvasView.kt'
+          BUILD='LumaPDF_RazrFold_2026_v042/app/build.gradle.kts'
+          grep -q 'appendPageText(doc, page, rect, text, style)' "$ENGINE"
+          grep -q 'appendContentStream(doc, pageObject' "$ENGINE"
+          grep -q 'doc.addSimpleFont' "$ENGINE"
+          grep -q 'doc.addStream' "$ENGINE"
+          grep -q 'redaction.applyRedaction' "$ENGINE"
+          grep -q 'verifySavedText(out)' "$ENGINE"
+          grep -q 'page.search(probe)' "$ENGINE"
+          grep -q 'garbage=2,compress,compress-images' "$ENGINE"
+          grep -q 'pix.asPNG()' "$ENGINE"
+          grep -q 'BitmapFactory.decodeByteArray' "$ENGINE"
+          grep -q 'pageBackgroundPaint' "$CANVAS"
+          grep -q 'versionCode = 5' "$BUILD"
+          grep -q 'versionName = "0.4.2-direct-text"' "$BUILD"
+          grep -q 'signingConfig = signingConfigs.getByName("lumaDev")' "$BUILD"
+          if grep -q 'TYPE_FREE_TEXT' "$ENGINE"; then echo 'FreeText text replacement returned'; exit 1; fi
+          if grep -q 'setRichContents' "$ENGINE"; then echo 'Unsafe rich-text path returned'; exit 1; fi
+          if grep -q 'richDefaults' "$ENGINE"; then echo 'Broken rich defaults path returned'; exit 1; fi
+          if grep -q 'page.applyRedactions' "$ENGINE"; then echo 'Page-wide redaction returned'; exit 1; fi
+          if grep -q 'doc.bake(true, false)' "$ENGINE"; then echo 'Destructive save bake returned'; exit 1; fi
+          if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw-pixel renderer returned'; exit 1; fi
+
+      - name: Package exact source used by CI
+        shell: bash
+        run: |
+          zip -qr LumaPDF-v042-source.zip LumaPDF_RazrFold_2026_v042
+          unzip -tq LumaPDF-v042-source.zip
+          sha256sum LumaPDF-v042-source.zip | tee LumaPDF-v042-source.sha256
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify stable LumaPDF signing key
+        shell: bash
+        run: keytool -list -keystore LumaPDF_RazrFold_2026_v042/app/lumapdf-dev.keystore -storepass lumapdfdev -alias lumapdf-dev
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Compile LumaPDF v0.4.2
+        working-directory: LumaPDF_RazrFold_2026_v042
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='LumaPDF_RazrFold_2026_v042/app/build/outputs/apk/debug/app-debug.apk'
+          test -f "$APK"
+          file "$APK"
+          unzip -tq "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmupdf_java.so'
+          ls -lh "$APK"
+          sha256sum "$APK" | tee LumaPDF-v042-apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v042-APK
+          path: |
+            LumaPDF_RazrFold_2026_v042/app/build/outputs/apk/debug/app-debug.apk
+            LumaPDF-v042-apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-ContentStudio-v042-Source
+          path: |
+            LumaPDF-v042-source.zip
+            LumaPDF-v042-source.sha256
+          if-no-files-found: error
+          retention-days: 14
