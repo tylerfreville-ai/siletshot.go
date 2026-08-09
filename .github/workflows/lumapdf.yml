@@ -4,7 +4,7 @@ on:
   push:
     branches: [lumapdf-build]
     paths:
-      - '.lumapdf/v023.part*'
+      - '.lumapdf/v023s.part*'
       - '.github/workflows/lumapdf.yml'
   workflow_dispatch:
 
@@ -14,10 +14,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct LumaPDF v0.2.3 source
+      - name: Reconstruct and verify LumaPDF v0.2.3 source
         shell: bash
         run: |
-          cat .lumapdf/v023.part* | base64 --decode > lumapdf-v023.zip
+          cat .lumapdf/v023s.part* | base64 --decode > lumapdf-v023.zip
+          echo 'e8ffe0fe190095ed9bf652e67f13be96e5eedb86d9359cd316755a27e27bc543  lumapdf-v023.zip' | sha256sum -c -
+          unzip -tq lumapdf-v023.zip
           unzip -q lumapdf-v023.zip
           test -f LumaPDF_RazrFold_2026_v02/settings.gradle.kts
           test -f LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
