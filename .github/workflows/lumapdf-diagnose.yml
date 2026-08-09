@@ -12,24 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compare current annotation engine with direct-content engine
+      - name: Inspect direct-content engine fields and save path
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .lumapdf/engine_v041.gz.b64 | gzip -dc > /tmp/current.kt
           cat .lumapdf/v023s.part* | base64 --decode > /tmp/v023.zip
           echo 'e8ffe0fe190095ed9bf652e67f13be96e5eedb86d9359cd316755a27e27bc543  /tmp/v023.zip' | sha256sum -c -
           unzip -q /tmp/v023.zip -d /tmp/v023
-          OLD='/tmp/v023/LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
-          echo '=== CURRENT v0.4.1 persistence ==='
-          grep -nE 'fun (saveAs|replacePageText|createFreeTextOnPage|setExplicitTextAppearance)|doc.bake|setAppearance' /tmp/current.kt || true
-          echo '=== DIRECT CONTENT call path ==='
-          sed -n '175,240p' "$OLD"
-          echo '=== DIRECT CONTENT implementation ==='
-          grep -nE 'fun (saveAs|replacePageText|appendPageText|appendContentStream)|addSimpleFont|addStream|Contents|Resources' "$OLD" || true
-          echo '=== DIRECT CONTENT code blocks ==='
-          awk '
-            /fun replacePageText|fun appendPageText|fun appendContentStream|fun saveAs/ {show=1; count=0}
-            show {print NR ":" $0; count++}
-            show && count>140 {show=0}
-          ' "$OLD"
+          ENGINE='/tmp/v023/LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
+          echo '=== HEADER / FIELDS ==='
+          sed -n '1,120p' "$ENGINE"
+          echo '=== EDIT PATH ==='
+          sed -n '185,235p' "$ENGINE"
+          echo '=== SAVE PATH ==='
+          sed -n '570,610p' "$ENGINE"
