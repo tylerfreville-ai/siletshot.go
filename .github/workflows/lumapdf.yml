@@ -22,6 +22,25 @@ jobs:
           test -f LumaPDF_RazrFold_2026_v02/settings.gradle.kts
           test -f LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
 
+      - name: Apply compiler fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          base = Path('LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf')
+          p = base / 'MainActivity.kt'
+          s = p.read_text()
+          s = s.replace('private fun showTextEditor(existing: MuPdfEngine.TextObject?, targetRect: Rect = existing?.rect ?: return) {\n        val p = UiKit.palette(this)', 'private fun showTextEditor(existing: MuPdfEngine.TextObject?, targetRect: Rect? = existing?.rect) {\n        val resolvedRect = targetRect ?: return\n        val p = UiKit.palette(this)')
+          s = s.replace('engine.addText(currentPage, targetRect, value, style)', 'engine.addText(currentPage, resolvedRect, value, style)')
+          s = s.replace('if (bytes.isNullOrEmpty()) { toast("Could not read that image."); return }', 'if (bytes == null || bytes.isEmpty()) { toast("Could not read that image."); return }\n        val imageBytes = bytes')
+          s = s.replace('engine.replaceImage(currentPage, obj, bytes)', 'engine.replaceImage(currentPage, obj, imageBytes)')
+          s = s.replace('showInsertImageDialog(bytes)', 'showInsertImageDialog(imageBytes)')
+          p.write_text(s)
+          p = base / 'editor' / 'MuPdfEngine.kt'
+          s = p.read_text().replace('val obj = page.object', 'val obj = page.getObject()')
+          p.write_text(s)
+          PY
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
