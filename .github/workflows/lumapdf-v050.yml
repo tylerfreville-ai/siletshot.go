@@ -5,7 +5,9 @@ on:
     branches: [lumapdf-build]
     paths:
       - '.github/workflows/lumapdf-v050.yml'
-      - '.lumapdf/v050.patch.gz.b64'
+      - '.lumapdf/main_v050.gz.b64'
+      - '.lumapdf/engine_v050.gz.b64'
+      - '.lumapdf/canvas_v050.gz.b64'
       - '.lumapdf/patch_v042.py'
       - '.lumapdf/v023s.part*'
   workflow_dispatch:
@@ -33,23 +35,27 @@ jobs:
           set -euo pipefail
           python .lumapdf/patch_v042.py
 
-      - name: Apply v0.5 direct manipulation patch
+      - name: Install exact v0.5 editor sources
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .lumapdf/v050.patch.gz.b64 | gzip -dc > v050.patch
-          cd LumaPDF_RazrFold_2026_v02
-          git apply ../v050.patch
+          ROOT='LumaPDF_RazrFold_2026_v02'
+          BASE="$ROOT/app/src/main/java/com/tstudio/lumapdf"
+          base64 --decode .lumapdf/main_v050.gz.b64 | gzip -dc > "$BASE/MainActivity.kt"
+          base64 --decode .lumapdf/engine_v050.gz.b64 | gzip -dc > "$BASE/editor/MuPdfEngine.kt"
+          base64 --decode .lumapdf/canvas_v050.gz.b64 | gzip -dc > "$BASE/editor/PageCanvasView.kt"
+          echo 'cba5e438febd5fe3c64c607755a9dc2386a271e1bec050ed7fcb4c33bff27560  '"$BASE/MainActivity.kt" | sha256sum -c -
+          echo '6057cb5678abadb5a27a7a0c1e877d995afc09e01b0dff3e19058637273b2e7e  '"$BASE/editor/MuPdfEngine.kt" | sha256sum -c -
+          echo 'bdf98e3588468be807bb8ffffb5a7525da1446305dca69c36749569cc4f8598d  '"$BASE/editor/PageCanvasView.kt" | sha256sum -c -
           python - <<'PY'
           from pathlib import Path
           import re
-          p = Path('app/build.gradle.kts')
+          p = Path('LumaPDF_RazrFold_2026_v02/app/build.gradle.kts')
           s = p.read_text()
           s = re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 6', s, count=1)
           s = re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "0.5.0-direct-manipulation"', s, count=1)
           p.write_text(s)
           PY
-          git diff --check
 
       - name: Direct manipulation regression guards
         shell: bash
@@ -65,13 +71,8 @@ jobs:
             local file="$1"
             local text="$2"
             local label="$3"
-            if grep -Fq -- "$text" "$file"; then
-              echo "PASS: $label"
-            else
-              echo "FAIL: $label"
-              echo "Expected literal: $text"
-              echo "File: $file"
-              exit 1
+            if grep -Fq -- "$text" "$file"; then echo "PASS: $label"; else
+              echo "FAIL: $label"; echo "Expected literal: $text"; echo "File: $file"; exit 1
             fi
           }
           forbid_literal() {
@@ -79,12 +80,8 @@ jobs:
             local text="$2"
             local label="$3"
             if grep -Fq -- "$text" "$file"; then
-              echo "FAIL: forbidden $label returned"
-              grep -Fn -- "$text" "$file" || true
-              exit 1
-            else
-              echo "PASS: $label absent"
-            fi
+              echo "FAIL: forbidden $label returned"; grep -Fn -- "$text" "$file" || true; exit 1
+            else echo "PASS: $label absent"; fi
           }
 
           require_literal "$BUILD" 'versionCode = 6' 'version code'
@@ -112,7 +109,6 @@ jobs:
           require_literal "$MAIN" 'duplicateSelection' 'duplicate selection UI'
           require_literal "$MAIN" 'deleteSelection' 'delete selection UI'
           require_literal "$MAIN" 'showMarkupMenu' 'markup selection UI'
-
           forbid_literal "$ENGINE" 'TYPE_FREE_TEXT' 'FreeText text editing path'
           forbid_literal "$ENGINE" 'doc.bake(true, false)' 'save-time annotation bake'
           forbid_literal "$ENGINE" 'bitmap.setPixels' 'unsafe raw-pixel renderer'
