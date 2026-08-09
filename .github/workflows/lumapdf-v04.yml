@@ -1,12 +1,9 @@
-name: Build LumaPDF v0.4 Text Engine APK
+name: Build LumaPDF Direct Text APK
 
 on:
   push:
     branches: [lumapdf-build]
     paths:
-      - '.lumapdf/v023s.part*'
-      - '.lumapdf/engine_v041.gz.b64'
-      - '.lumapdf/lumapdf-dev.keystore.b64'
       - '.github/workflows/lumapdf-v04.yml'
   workflow_dispatch:
 
@@ -16,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct verified base and inject v0.4.1 engine
+      - name: Reconstruct verified LumaPDF base
         shell: bash
         run: |
           set -euo pipefail
@@ -24,125 +21,197 @@ jobs:
           echo 'e8ffe0fe190095ed9bf652e67f13be96e5eedb86d9359cd316755a27e27bc543  LumaPDF-base.zip' | sha256sum -c -
           unzip -tq LumaPDF-base.zip
           unzip -q LumaPDF-base.zip
-          mv LumaPDF_RazrFold_2026_v02 LumaPDF_RazrFold_2026_v04
+          mv LumaPDF_RazrFold_2026_v02 LumaPDF_RazrFold_2026_v042
+          base64 --decode .lumapdf/lumapdf-dev.keystore.b64 > LumaPDF_RazrFold_2026_v042/app/lumapdf-dev.keystore
+          test -s LumaPDF_RazrFold_2026_v042/app/lumapdf-dev.keystore
 
-          base64 --decode .lumapdf/engine_v041.gz.b64 | gzip -dc > /tmp/MuPdfEngine.kt
-          echo 'b9e2a2881b8816dbc559ec112633ead891c351f7b132543fcc30f0582bd3fc7a  /tmp/MuPdfEngine.kt' | sha256sum -c -
-          cp /tmp/MuPdfEngine.kt LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
-
-          base64 --decode .lumapdf/lumapdf-dev.keystore.b64 > LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore
-          test -s LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore
-
-      - name: Apply renderer UI and signing fixes
+      - name: Apply direct persistent text fixes
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          root = Path('LumaPDF_RazrFold_2026_v04')
-          base = root / 'app/src/main/java/com/tstudio/lumapdf'
+          import re
 
-          # On any failed native mutation, immediately re-render the rolled-back state.
-          p = base / 'MainActivity.kt'
-          s = p.read_text()
+          root = Path('LumaPDF_RazrFold_2026_v042')
+          base = root / 'app/src/main/java/com/tstudio/lumapdf'
+          engine = base / 'editor/MuPdfEngine.kt'
+          s = engine.read_text()
+
+          if 'appendPageText(doc, page, rect, text, style)' not in s:
+              raise SystemExit('Direct page-content text engine missing')
+
+          text_old = '''                    page.applyRedactions(
+                        false,
+                        PDFPage.REDACT_IMAGE_NONE,
+                        PDFPage.REDACT_LINE_ART_NONE,
+                        PDFPage.REDACT_TEXT_REMOVE,
+                    )'''
+          text_new = '''                    require(redaction.applyRedaction(
+                        false,
+                        PDFPage.REDACT_IMAGE_NONE,
+                        PDFPage.REDACT_LINE_ART_NONE,
+                        PDFPage.REDACT_TEXT_REMOVE,
+                    )) { "Could not remove the original text from this PDF." }'''
+          if text_old not in s:
+              raise SystemExit('Text redaction block missing')
+          s = s.replace(text_old, text_new, 1)
+
+          image_old = '''                page.applyRedactions(
+                    false,
+                    PDFPage.REDACT_IMAGE_REMOVE,
+                    PDFPage.REDACT_LINE_ART_NONE,
+                    PDFPage.REDACT_TEXT_NONE,
+                )'''
+          image_new = '''                require(redaction.applyRedaction(
+                    false,
+                    PDFPage.REDACT_IMAGE_REMOVE,
+                    PDFPage.REDACT_LINE_ART_NONE,
+                    PDFPage.REDACT_TEXT_NONE,
+                )) { "Could not remove the selected image." }'''
+          if image_old in s:
+              s = s.replace(image_old, image_new, 1)
           s = s.replace(
-              '}.onFailure { toast(it.message ?: "Could not render this page.") }',
-              '}.onFailure {\n                statusView?.text = "Could not render page ${currentPage + 1}"\n                toast(it.message ?: "Could not render this page.")\n            }'
+              'page.applyRedactions(false, PDFPage.REDACT_IMAGE_REMOVE, PDFPage.REDACT_LINE_ART_NONE, PDFPage.REDACT_TEXT_NONE)',
+              'require(redaction.applyRedaction(false, PDFPage.REDACT_IMAGE_REMOVE, PDFPage.REDACT_LINE_ART_NONE, PDFPage.REDACT_TEXT_NONE)) { "Could not replace the selected image." }'
           )
-          s = s.replace(
+
+          marker = 'private var document: PDFDocument? = null'
+          if marker not in s:
+              raise SystemExit('Document field missing')
+          s = s.replace(marker, marker + '\n    private val pendingTextChecks = mutableListOf<Pair<Int, String>>()', 1)
+
+          m = re.search(r'private fun editTextAt\(.*?\n    \}', s, flags=re.S)
+          if not m:
+              raise SystemExit('editTextAt function missing')
+          block = m.group(0)
+          needle = '            doc.endOperation()'
+          if needle not in block:
+              raise SystemExit('editTextAt endOperation missing')
+          block = block.replace(needle, needle + '\n            if (text.isNotBlank()) pendingTextChecks += pageIndex to sanitizePdfText(text)', 1)
+          s = s[:m.start()] + block + s[m.end():]
+
+          save_old = '''        // Bake our text/image/ink annotations into real page content while preserving form widgets.
+        doc.bake(true, false)
+        doc.save(out.absolutePath, "garbage=4,compress,compress-images")'''
+          save_new = '''        // Edited text is already real page content. Preserve annotations and forms as PDF objects.
+        doc.save(out.absolutePath, "garbage=2,compress,compress-images")
+        verifySavedText(out)'''
+          if save_old not in s:
+              raise SystemExit('Save block missing')
+          s = s.replace(save_old, save_new, 1)
+
+          verify = '''    private fun verifySavedText(file: File) {
+        if (pendingTextChecks.isEmpty()) return
+        val checkDoc = Document.openDocument(file.absolutePath).asPDF()
+        try {
+            pendingTextChecks.distinct().forEach { (pageIndex, rawText) ->
+                val probes = rawText.lineSequence().map { it.trim() }.filter { it.length >= 2 }.take(4).toList()
+                if (probes.isEmpty()) return@forEach
+                val page = checkDoc.loadPage(pageIndex)
+                try {
+                    probes.forEach { probe ->
+                        require(page.search(probe).isNotEmpty()) {
+                            "Save verification failed: edited text did not survive PDF serialization."
+                        }
+                    }
+                } finally {
+                    page.destroy()
+                }
+            }
+        } finally {
+            checkDoc.destroy()
+        }
+    }
+
+'''
+          close_marker = '    fun close() {'
+          if close_marker not in s:
+              raise SystemExit('Close function missing')
+          s = s.replace(close_marker, verify + close_marker, 1)
+          s = s.replace('        out.delete()\n    }', '        pendingTextChecks.clear()\n        out.delete()\n    }', 1)
+          engine.write_text(s)
+
+          canvas = base / 'editor/PageCanvasView.kt'
+          c = canvas.read_text()
+          if 'pageBackgroundPaint' not in c:
+              c = c.replace(
+                  'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n',
+                  'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n    private val pageBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }\n'
+              )
+              c = c.replace(
+                  'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)',
+                  'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawRect(dst, pageBackgroundPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)'
+              )
+          c = c.replace(
+              'if (mode == Mode.SELECT) {\n            s.textObjects.forEach { canvas.drawRect(toScreen(it.rect), editHintPaint) }\n        }\n',
+              '// Select mode keeps hit targets invisible until tapped.\n'
+          )
+          canvas.write_text(c)
+
+          main = base / 'MainActivity.kt'
+          ms = main.read_text()
+          ms = ms.replace(
               'result.onSuccess { renderCurrentPage() }.onFailure { toast(it.message ?: "$label failed") }',
               'result.onSuccess { renderCurrentPage() }.onFailure {\n                renderCurrentPage()\n                toast(it.message ?: "$label failed")\n            }'
           )
-          p.write_text(s)
+          main.write_text(ms)
 
-          # Always display PDFs on opaque white paper. Keep selection hit testing, but
-          # only outline the tapped object rather than every text block on the page.
-          p = base / 'editor/PageCanvasView.kt'
-          s = p.read_text()
-          s = s.replace(
-              'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n',
-              'private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n    private val pageBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }\n'
-          )
-          s = s.replace(
-              'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)',
-              'canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawRect(dst, pageBackgroundPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)'
-          )
-          s = s.replace(
-              'if (mode == Mode.SELECT) {\n            s.textObjects.forEach { canvas.drawRect(toScreen(it.rect), editHintPaint) }\n        }\n',
-              '// Select mode keeps invisible hit targets; only the tapped object is outlined.\n'
-          )
-          p.write_text(s)
-
-          # Stable development signing from this version forward.
-          p = root / 'app/build.gradle.kts'
-          s = p.read_text().replace('versionName = "0.2.3-content-text"', 'versionName = "0.4.0-text-engine"')
-          marker = '''    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
+          build = root / 'app/build.gradle.kts'
+          b = build.read_text()
+          b = re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 5', b, count=1)
+          b = re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "0.4.2-direct-text"', b, count=1)
+          feature = '''    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
           signing = '''    signingConfigs {\n        create("lumaDev") {\n            storeFile = file("lumapdf-dev.keystore")\n            storePassword = "lumapdfdev"\n            keyAlias = "lumapdf-dev"\n            keyPassword = "lumapdfdev"\n        }\n    }\n\n    buildTypes {\n        getByName("debug") {\n            signingConfig = signingConfigs.getByName("lumaDev")\n        }\n    }\n\n    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
-          if 'signingConfigs {' not in s:
-              if marker not in s:
-                  raise SystemExit('buildFeatures marker not found')
-              s = s.replace(marker, signing)
-          p.write_text(s)
+          if 'signingConfigs {' not in b:
+              if feature not in b:
+                  raise SystemExit('Build features marker missing')
+              b = b.replace(feature, signing, 1)
+          build.write_text(b)
           PY
 
-      - name: Runtime and editing regression guards
+      - name: Direct text regression guards
         shell: bash
         run: |
           set -euo pipefail
-          ENGINE='LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
-          CANVAS='LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/editor/PageCanvasView.kt'
-          MAIN='LumaPDF_RazrFold_2026_v04/app/src/main/java/com/tstudio/lumapdf/MainActivity.kt'
-          BUILD='LumaPDF_RazrFold_2026_v04/app/build.gradle.kts'
-
-          # Existing edits remain discoverable/editable after rendering/reload.
-          grep -q 'annotationObjectNumber' "$ENGINE"
-          grep -q 'page.getAnnotations()' "$ENGINE"
-
-          # Text replacement gets an explicit appearance stream and real PDF font resource.
-          grep -q 'setExplicitTextAppearance' "$ENGINE"
-          grep -q 'annot.setAppearance(Rect' "$ENGINE"
+          ENGINE='LumaPDF_RazrFold_2026_v042/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
+          CANVAS='LumaPDF_RazrFold_2026_v042/app/src/main/java/com/tstudio/lumapdf/editor/PageCanvasView.kt'
+          BUILD='LumaPDF_RazrFold_2026_v042/app/build.gradle.kts'
+          grep -q 'appendPageText(doc, page, rect, text, style)' "$ENGINE"
+          grep -q 'appendContentStream(doc, pageObject' "$ENGINE"
           grep -q 'doc.addSimpleFont' "$ENGINE"
           grep -q 'doc.addStream' "$ENGINE"
-          grep -q 'Helvetica-BoldOblique' "$ENGINE"
-          grep -q 'createFreeTextOnPage(page, originalRect, text, style)' "$ENGINE"
-
-          # Destructive edits are object-local and journal protected.
           grep -q 'redaction.applyRedaction' "$ENGINE"
-          grep -q 'doc.abandonOperation()' "$ENGINE"
-
-          # Rendering is PNG decoded, not unsafe raw packed integer pixels.
+          grep -q 'verifySavedText(out)' "$ENGINE"
+          grep -q 'page.search(probe)' "$ENGINE"
+          grep -q 'garbage=2,compress,compress-images' "$ENGINE"
           grep -q 'pix.asPNG()' "$ENGINE"
           grep -q 'BitmapFactory.decodeByteArray' "$ENGINE"
           grep -q 'pageBackgroundPaint' "$CANVAS"
-
-          # Existing source text color remains the initial edit swatch.
-          grep -q 'add(existing?.argb ?: Color.BLACK)' "$MAIN"
-
-          grep -q 'versionCode = 4' "$BUILD"
-          grep -q 'versionName = "0.4.0-text-engine"' "$BUILD"
+          grep -q 'versionCode = 5' "$BUILD"
+          grep -q 'versionName = "0.4.2-direct-text"' "$BUILD"
           grep -q 'signingConfig = signingConfigs.getByName("lumaDev")' "$BUILD"
+          if grep -q 'TYPE_FREE_TEXT' "$ENGINE"; then exit 31; fi
+          if grep -q 'setRichContents' "$ENGINE"; then exit 32; fi
+          if grep -q 'richDefaults' "$ENGINE"; then exit 33; fi
+          if grep -q 'page.applyRedactions' "$ENGINE"; then exit 34; fi
+          if grep -q 'doc.bake(true, false)' "$ENGINE"; then exit 35; fi
+          if grep -q 'bitmap.setPixels' "$ENGINE"; then exit 36; fi
 
-          if grep -q 'setRichContents' "$ENGINE"; then echo 'Unsafe rich-content path returned'; exit 1; fi
-          if grep -q 'richDefaults' "$ENGINE"; then echo 'Broken setRichDefaults JNI path returned'; exit 1; fi
-          if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw-pixel renderer returned'; exit 1; fi
-          if grep -q 'page.applyRedactions' "$ENGINE"; then echo 'Page-wide redaction path returned'; exit 1; fi
-
-      - name: Package exact source used by CI
+      - name: Package source
         shell: bash
         run: |
-          rm -f LumaPDF-v040-source.zip
-          zip -qr LumaPDF-v040-source.zip LumaPDF_RazrFold_2026_v04
-          unzip -tq LumaPDF-v040-source.zip
-          sha256sum LumaPDF-v040-source.zip | tee LumaPDF-v040-source.sha256
+          zip -qr LumaPDF-v042-source.zip LumaPDF_RazrFold_2026_v042
+          unzip -tq LumaPDF-v042-source.zip
+          sha256sum LumaPDF-v042-source.zip | tee LumaPDF-v042-source.sha256
 
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Verify persistent development signing key
+      - name: Verify signing key
         shell: bash
-        run: |
-          keytool -list -keystore LumaPDF_RazrFold_2026_v04/app/lumapdf-dev.keystore -storepass lumapdfdev -alias lumapdf-dev
+        run: keytool -list -keystore LumaPDF_RazrFold_2026_v042/app/lumapdf-dev.keystore -storepass lumapdfdev -alias lumapdf-dev
 
       - uses: android-actions/setup-android@v3
 
@@ -156,36 +225,35 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
-      - name: Build LumaPDF v0.4
-        working-directory: LumaPDF_RazrFold_2026_v04
+      - name: Compile APK
+        working-directory: LumaPDF_RazrFold_2026_v042
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify APK and native package
+      - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
-          APK='LumaPDF_RazrFold_2026_v04/app/build/outputs/apk/debug/app-debug.apk'
+          APK='LumaPDF_RazrFold_2026_v042/app/build/outputs/apk/debug/app-debug.apk'
           test -f "$APK"
-          file "$APK"
           unzip -tq "$APK"
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmupdf_java.so'
           ls -lh "$APK"
-          sha256sum "$APK" | tee LumaPDF-v040-apk.sha256
+          sha256sum "$APK" | tee LumaPDF-v042-apk.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LumaPDF-ContentStudio-v040-APK
+          name: LumaPDF-ContentStudio-v042-APK
           path: |
-            LumaPDF_RazrFold_2026_v04/app/build/outputs/apk/debug/app-debug.apk
-            LumaPDF-v040-apk.sha256
+            LumaPDF_RazrFold_2026_v042/app/build/outputs/apk/debug/app-debug.apk
+            LumaPDF-v042-apk.sha256
           if-no-files-found: error
           retention-days: 14
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LumaPDF-ContentStudio-v040-Source
+          name: LumaPDF-ContentStudio-v042-Source
           path: |
-            LumaPDF-v040-source.zip
-            LumaPDF-v040-source.sha256
+            LumaPDF-v042-source.zip
+            LumaPDF-v042-source.sha256
           if-no-files-found: error
           retention-days: 14
