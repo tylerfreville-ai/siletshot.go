@@ -4,7 +4,7 @@ on:
   push:
     branches: [lumapdf-build]
     paths:
-      - '.lumapdf/v02.part*'
+      - '.lumapdf/v023.part*'
       - '.github/workflows/lumapdf.yml'
   workflow_dispatch:
 
@@ -14,159 +14,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct LumaPDF source
+      - name: Reconstruct LumaPDF v0.2.3 source
         shell: bash
         run: |
-          cat .lumapdf/v02.part* | base64 --decode > lumapdf-v02.zip
-          unzip -q lumapdf-v02.zip
+          cat .lumapdf/v023.part* | base64 --decode > lumapdf-v023.zip
+          unzip -q lumapdf-v023.zip
           test -f LumaPDF_RazrFold_2026_v02/settings.gradle.kts
           test -f LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt
 
-      - name: Apply v0.3 runtime stability fixes
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          base = Path('LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf')
-
-          # MainActivity: retain compiler fixes, improve recovery after native failures,
-          # and preserve the detected source text color in the editor.
-          p = base / 'MainActivity.kt'
-          s = p.read_text()
-          s = s.replace(
-              'private fun showTextEditor(existing: MuPdfEngine.TextObject?, targetRect: Rect = existing?.rect ?: return) {\n        val p = UiKit.palette(this)',
-              'private fun showTextEditor(existing: MuPdfEngine.TextObject?, targetRect: Rect? = existing?.rect) {\n        val resolvedRect = targetRect ?: return\n        val p = UiKit.palette(this)'
-          )
-          s = s.replace('engine.addText(currentPage, targetRect, value, style)', 'engine.addText(currentPage, resolvedRect, value, style)')
-          s = s.replace(
-              'if (bytes.isNullOrEmpty()) { toast("Could not read that image."); return }',
-              'if (bytes == null || bytes.isEmpty()) { toast("Could not read that image."); return }\n        val imageBytes = bytes'
-          )
-          s = s.replace('engine.replaceImage(currentPage, obj, bytes)', 'engine.replaceImage(currentPage, obj, imageBytes)')
-          s = s.replace('showInsertImageDialog(bytes)', 'showInsertImageDialog(imageBytes)')
-          s = s.replace(
-              '}.onFailure { toast(it.message ?: "Could not render this page.") }',
-              '}.onFailure {\n                statusView?.text = "Could not render page ${currentPage + 1}"\n                toast(it.message ?: "Could not render this page.")\n            }'
-          )
-          old_colors = '''        colors.forEachIndexed { i, color ->\n            colorGroup.addView(RadioButton(this).apply {\n                id = 6100 + i; text = "●"; textSize = 22f; setTextColor(color); if (i == 0) isChecked = true\n            })\n        }\n'''
-          new_colors = '''        val existingColor = existing?.argb ?: Color.BLACK\n        val initialColorIndex = colors.indices.minByOrNull { i ->\n            val c = colors[i]\n            kotlin.math.abs(Color.red(c) - Color.red(existingColor)) +\n                kotlin.math.abs(Color.green(c) - Color.green(existingColor)) +\n                kotlin.math.abs(Color.blue(c) - Color.blue(existingColor))\n        } ?: 0\n        colors.forEachIndexed { i, color ->\n            colorGroup.addView(RadioButton(this).apply {\n                id = 6100 + i; text = "●"; textSize = 22f; setTextColor(color); if (i == initialColorIndex) isChecked = true\n            })\n        }\n'''
-          if old_colors in s:
-              s = s.replace(old_colors, new_colors)
-          s = s.replace(
-              'result.onSuccess { renderCurrentPage() }.onFailure { toast(it.message ?: "$label failed") }',
-              'result.onSuccess { renderCurrentPage() }.onFailure {\n                renderCurrentPage()\n                toast(it.message ?: "$label failed")\n            }'
-          )
-          p.write_text(s)
-
-          # MuPDF engine: opaque/color-correct rendering and only JNI calls that are
-          # actually present in the 1.28 Android native library.
-          p = base / 'editor' / 'MuPdfEngine.kt'
-          s = p.read_text()
-          s = s.replace('import android.graphics.Bitmap\n', 'import android.graphics.Bitmap\nimport android.graphics.BitmapFactory\n')
-          s = s.replace('val obj = page.object', 'val obj = page.getObject()')
-
-          old_render_false = '''            val pix = page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")\n            val bitmap = Bitmap.createBitmap(pix.width, pix.height, Bitmap.Config.ARGB_8888)\n            bitmap.setPixels(pix.pixels, 0, pix.width, 0, 0, pix.width, pix.height)\n            pix.destroy()\n'''
-          old_render_true = '''            val pix = page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, true, true, "View")\n            val bitmap = Bitmap.createBitmap(pix.width, pix.height, Bitmap.Config.ARGB_8888)\n            bitmap.setPixels(pix.pixels, 0, pix.width, 0, 0, pix.width, pix.height)\n            pix.destroy()\n'''
-          new_render = '''            // Do not feed MuPDF packed pixel ints directly into Android. Render an\n            // opaque DeviceRGB page, encode it as PNG, then let Android perform the\n            // final decode. This fixes transparent pages turning black and RGB channel\n            // shifts (for example magenta logos becoming purple).\n            val pix = page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")\n            val bitmap = try {\n                val png = pix.asPNG()\n                try {\n                    val bytes = png.asByteArray()\n                    requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size)) {\n                        "MuPDF rendered the page but Android could not decode it."\n                    }\n                } finally {\n                    png.destroy()\n                }\n            } finally {\n                pix.destroy()\n            }\n'''
-          if old_render_false in s:
-              s = s.replace(old_render_false, new_render)
-          elif old_render_true in s:
-              s = s.replace(old_render_true, new_render)
-          else:
-              raise SystemExit('Expected MuPDF raw pixel renderer was not found')
-
-          # Apply only the redaction created for the selected object. This avoids applying
-          # unrelated redaction annotations that may already exist in a user's PDF.
-          old_text_redaction = '''                    redaction.update()\n                    page.applyRedactions(\n                        false,\n                        PDFPage.REDACT_IMAGE_NONE,\n                        PDFPage.REDACT_LINE_ART_NONE,\n                        PDFPage.REDACT_TEXT_REMOVE,\n                    )\n'''
-          new_text_redaction = '''                    redaction.update()\n                    require(redaction.applyRedaction(\n                        false,\n                        PDFPage.REDACT_IMAGE_NONE,\n                        PDFPage.REDACT_LINE_ART_NONE,\n                        PDFPage.REDACT_TEXT_REMOVE,\n                    )) { "Could not remove the original text from this PDF object." }\n'''
-          if old_text_redaction in s:
-              s = s.replace(old_text_redaction, new_text_redaction, 1)
-
-          # MuPDF 1.28's Java class declares setRichDefaults(), but the shipped Android
-          # libmupdf_java.so has no PDFAnnotation_setRichDefaults JNI symbol. Never call it.
-          s = s.replace('                annot.richDefaults = css\n', '')
-          old_rich_tail = '''                annot.contents = text\n                val escaped = escapeHtml(text).replace("\\n", "<br/>")\n                val rich = "<body><p><span style=\\"$css\\">$escaped</span></p></body>"\n                runCatching { annot.setRichContents(text, rich) }\n                annot.update()\n                page.update()\n'''
-          new_rich_tail = '''                // Plain FreeText contents and default appearance are the reliable base.\n                // Rich contents are an enhancement and are guarded so formatting can\n                // never make basic text replacement crash.\n                annot.contents = text\n                val escaped = escapeHtml(text).replace("\\n", "<br/>")\n                val rich = "<body><p><span style=\\"$css\\">$escaped</span></p></body>"\n                runCatching { annot.setRichContents(text, rich) }\n                runCatching { annot.requestResynthesis() }\n                annot.update()\n                page.update()\n'''
-          if old_rich_tail in s:
-              s = s.replace(old_rich_tail, new_rich_tail)
-
-          old_remove_image = '''                redaction.update()\n                page.applyRedactions(\n                    false,\n                    PDFPage.REDACT_IMAGE_REMOVE,\n                    PDFPage.REDACT_LINE_ART_NONE,\n                    PDFPage.REDACT_TEXT_NONE,\n                )\n                page.update()\n'''
-          new_remove_image = '''                redaction.update()\n                require(redaction.applyRedaction(\n                    false,\n                    PDFPage.REDACT_IMAGE_REMOVE,\n                    PDFPage.REDACT_LINE_ART_NONE,\n                    PDFPage.REDACT_TEXT_NONE,\n                )) { "Could not remove this image from the PDF." }\n                page.update()\n'''
-          if old_remove_image in s:
-              s = s.replace(old_remove_image, new_remove_image, 1)
-
-          old_replace_image = '                redaction.update()\n                page.applyRedactions(false, PDFPage.REDACT_IMAGE_REMOVE, PDFPage.REDACT_LINE_ART_NONE, PDFPage.REDACT_TEXT_NONE)\n                val image = Image(bytes)\n'
-          new_replace_image = '                redaction.update()\n                require(redaction.applyRedaction(false, PDFPage.REDACT_IMAGE_REMOVE, PDFPage.REDACT_LINE_ART_NONE, PDFPage.REDACT_TEXT_NONE)) {\n                    "Could not remove the original image from this PDF."\n                }\n                val image = Image(bytes)\n'
-          if old_replace_image in s:
-              s = s.replace(old_replace_image, new_replace_image)
-
-          # Use the verified setNativeAppearanceImage-backed wrapper rather than relying
-          # on a second stamp-image entry point.
-          s = s.replace('                annot.setStampImage(image)\n', '                annot.setAppearance(image)\n')
-          s = s.replace(
-              'doc.save(out.absolutePath, "garbage=4,compress,compress-images")',
-              'doc.save(out.absolutePath, "garbage=4,compress,compress-images,compress-fonts")\n        require(out.exists() && out.length() > 32L) { "MuPDF did not produce a valid output file." }'
-          )
-          p.write_text(s)
-
-          # PageCanvasView: an actual white sheet behind every rendered PDF, and no sea
-          # of blue text-block rectangles obscuring the document while selecting.
-          p = base / 'editor' / 'PageCanvasView.kt'
-          s = p.read_text()
-          s = s.replace(
-              '    private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n    private val shadowPaint',
-              '    private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)\n    private val pageBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }\n    private val shadowPaint'
-          )
-          s = s.replace(
-              '        canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)',
-              '        canvas.drawRoundRect(RectF(left + 3, top + 8, left + drawW + 3, top + drawH + 8), 8f, 8f, shadowPaint)\n        canvas.drawRect(dst, pageBackgroundPaint)\n        canvas.drawBitmap(bm, null, dst, pagePaint)'
-          )
-          s = s.replace(
-              '        if (mode == Mode.SELECT) {\n            s.textObjects.forEach { canvas.drawRect(toScreen(it.rect), editHintPaint) }\n        }\n',
-              '        // Text hit-testing stays active; only the tapped object is outlined.\n'
-          )
-          p.write_text(s)
-
-          # Version and stable development signing. One uninstall may be required when
-          # moving from older random CI debug keys; subsequent v0.3+ builds can update.
-          p = Path('LumaPDF_RazrFold_2026_v02/app/build.gradle.kts')
-          s = p.read_text().replace('versionCode = 2', 'versionCode = 3').replace(
-              'versionName = "0.2.0-content-studio"', 'versionName = "0.3.0-stability"'
-          )
-          marker = '''    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
-          signing = '''    signingConfigs {\n        create("lumaDev") {\n            storeFile = file("lumapdf-dev.keystore")\n            storePassword = "lumapdfdev"\n            keyAlias = "lumapdf-dev"\n            keyPassword = "lumapdfdev"\n        }\n    }\n\n    buildTypes {\n        getByName("debug") {\n            signingConfig = signingConfigs.getByName("lumaDev")\n        }\n    }\n\n    buildFeatures {\n        viewBinding = false\n        buildConfig = true\n    }\n'''
-          if marker in s:
-              s = s.replace(marker, signing)
-          p.write_text(s)
-          PY
-
-      - name: Regression guards
+      - name: Text editing regression guards
         shell: bash
         run: |
           ENGINE='LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
-          CANVAS='LumaPDF_RazrFold_2026_v02/app/src/main/java/com/tstudio/lumapdf/editor/PageCanvasView.kt'
-          grep -q 'BitmapFactory.decodeByteArray' "$ENGINE"
+          grep -q 'appendPageText' "$ENGINE"
+          grep -q 'doc.addSimpleFont' "$ENGINE"
+          grep -q 'doc.addStream' "$ENGINE"
+          grep -q 'appendContentStream' "$ENGINE"
+          grep -q 'doc.abandonOperation()' "$ENGINE"
           grep -q 'pix.asPNG()' "$ENGINE"
-          grep -q 'redaction.applyRedaction' "$ENGINE"
-          grep -q 'annot.requestResynthesis()' "$ENGINE"
-          grep -q 'pageBackgroundPaint' "$CANVAS"
+          if grep -q 'setRichContents' "$ENGINE"; then echo 'Unsafe rich-text annotation path returned'; exit 1; fi
+          if grep -q 'TYPE_FREE_TEXT' "$ENGINE"; then echo 'FreeText replacement path returned'; exit 1; fi
           if grep -q 'bitmap.setPixels' "$ENGINE"; then echo 'Unsafe raw pixel renderer returned'; exit 1; fi
-          if grep -q 'annot.richDefaults' "$ENGINE"; then echo 'Broken MuPDF richDefaults JNI call returned'; exit 1; fi
-          if grep -q 'page.applyRedactions' "$ENGINE"; then echo 'Page-wide redaction path returned'; exit 1; fi
 
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Create stable development signing key
-        shell: bash
-        run: |
-          keytool -genkeypair -noprompt \
-            -keystore LumaPDF_RazrFold_2026_v02/app/lumapdf-dev.keystore \
-            -storepass lumapdfdev -keypass lumapdfdev \
-            -alias lumapdf-dev -keyalg RSA -keysize 2048 -validity 36500 \
-            -dname 'CN=LumaPDF Development, OU=Development, O=LumaPDF, L=La Porte, ST=Indiana, C=US'
 
       - uses: android-actions/setup-android@v3
 
@@ -180,11 +53,11 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
-      - name: Build content editor APK
+      - name: Build v0.2.3 APK
         working-directory: LumaPDF_RazrFold_2026_v02
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify APK and MuPDF JNI surface
+      - name: Verify APK
         shell: bash
         run: |
           APK='LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk'
@@ -192,24 +65,10 @@ jobs:
           file "$APK"
           ls -lh "$APK"
           sha256sum "$APK"
-          unzip -p "$APK" lib/arm64-v8a/libmupdf_java.so > /tmp/libmupdf_java.so
-          for sym in \
-            Java_com_artifex_mupdf_fitz_Pixmap_asPNG \
-            Java_com_artifex_mupdf_fitz_PDFAnnotation_setRichContents \
-            Java_com_artifex_mupdf_fitz_PDFAnnotation_requestResynthesis \
-            Java_com_artifex_mupdf_fitz_PDFAnnotation_applyRedaction \
-            Java_com_artifex_mupdf_fitz_PDFAnnotation_setNativeAppearanceImage; do
-            nm -D /tmp/libmupdf_java.so | grep -q "$sym" || { echo "Missing JNI symbol: $sym"; exit 1; }
-          done
-          if nm -D /tmp/libmupdf_java.so | grep -q 'PDFAnnotation_setRichDefaults'; then
-            echo 'Unexpected setRichDefaults JNI symbol now exists; review workaround when upgrading MuPDF.'
-          else
-            echo 'Confirmed: setRichDefaults JNI is absent and LumaPDF does not call it.'
-          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LumaPDF-ContentStudio-v030-Stability-APK
+          name: LumaPDF-ContentStudio-v023-APK
           path: LumaPDF_RazrFold_2026_v02/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
