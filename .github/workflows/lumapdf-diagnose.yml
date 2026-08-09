@@ -1,0 +1,26 @@
+name: Diagnose LumaPDF text persistence
+
+on:
+  push:
+    branches: [lumapdf-build]
+    paths:
+      - '.github/workflows/lumapdf-diagnose.yml'
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode current v0.4.1 engine
+        shell: bash
+        run: |
+          base64 --decode .lumapdf/engine_v041.gz.b64 | gzip -dc > /tmp/MuPdfEngine.kt
+          echo '=== function locations ==='
+          grep -nE 'fun (save|saveAs|replaceText|addText|createFreeTextOnPage|setExplicitTextAppearance)|setAppearance|applyRedaction|update\(' /tmp/MuPdfEngine.kt || true
+          echo '=== text persistence code ==='
+          awk '
+            /fun replaceText|fun addText|fun createFreeTextOnPage|fun setExplicitTextAppearance|fun save|fun saveAs/ {show=1; count=0}
+            show {print NR ":" $0; count++}
+            show && count>120 {show=0}
+          ' /tmp/MuPdfEngine.kt
