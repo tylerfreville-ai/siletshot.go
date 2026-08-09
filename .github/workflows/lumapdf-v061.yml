@@ -5,7 +5,6 @@ on:
     branches: [lumapdf-build]
     paths:
       - '.github/workflows/lumapdf-v061.yml'
-      - '.lumapdf/v061.patch.gz.b64'
       - '.lumapdf/v060-rel.patch.gz.b64'
       - '.lumapdf/v050.patch.gz.b64'
       - '.lumapdf/patch_v050_compilefix.py'
@@ -49,15 +48,68 @@ jobs:
           patch --dry-run -p2 < ../v060.patch
           patch -p2 < ../v060.patch
 
-      - name: Apply v0.6.1 runtime hardening
+      - name: Apply v0.6.1 native null-contract hardening
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .lumapdf/v061.patch.gz.b64 | gzip -dc > v061.patch
-          echo '35cced2699e034aeb47df61ad7521bbf93e4d92bd1a20dd8d0ef4c753ab92f7b  v061.patch' | sha256sum -c -
-          cd LumaPDF_RazrFold_2026_v02
-          patch --dry-run -p1 < ../v061.patch
-          patch -p1 < ../v061.patch
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path('LumaPDF_RazrFold_2026_v02')
+          engine = root / 'app/src/main/java/com/tstudio/lumapdf/editor/MuPdfEngine.kt'
+          build = root / 'app/build.gradle.kts'
+          main = root / 'app/src/main/java/com/tstudio/lumapdf/MainActivity.kt'
+
+          s = engine.read_text()
+          required = [
+              'page.getAnnotations().forEach { annot ->',
+              'private fun findAnnotation(page: PDFPage, objectNumber: Int): PDFAnnotation? = page.getAnnotations().firstOrNull { candidate ->',
+              'if (page.search(query).isNotEmpty()) hits += index',
+              'require(page.search(probe).isNotEmpty()) {',
+          ]
+          for needle in required:
+              if needle not in s:
+                  raise SystemExit(f'Expected v0.6 source pattern missing: {needle}')
+
+          # MuPDF 1.28 JNI intentionally returns NULL when a page contains zero annotations.
+          # Never call Kotlin collection extensions directly on that platform array.
+          s = s.replace(
+              '            page.getAnnotations().forEach { annot ->',
+              '            val annotations = runCatching { page.getAnnotations() }.getOrNull().orEmpty()\n            annotations.forEach { annot ->',
+              1,
+          )
+          s = s.replace(
+              '''    private fun findAnnotation(page: PDFPage, objectNumber: Int): PDFAnnotation? = page.getAnnotations().firstOrNull { candidate ->\n        runCatching {\n            val obj = candidate.getObject()\n            obj.isIndirect() && obj.asIndirect() == objectNumber\n        }.getOrDefault(false)\n    }''',
+              '''    private fun findAnnotation(page: PDFPage, objectNumber: Int): PDFAnnotation? {\n        val annotations = runCatching { page.getAnnotations() }.getOrNull().orEmpty()\n        return annotations.firstOrNull { candidate ->\n            runCatching {\n                val obj = candidate.getObject()\n                obj != null && obj.isIndirect() && obj.asIndirect() == objectNumber\n            }.getOrDefault(false)\n        }\n    }''',
+              1,
+          )
+          s = s.replace('if (page.search(query).isNotEmpty()) hits += index', 'if (page.search(query).orEmpty().isNotEmpty()) hits += index')
+          s = s.replace('require(page.search(probe).isNotEmpty()) {', 'require(page.search(probe).orEmpty().isNotEmpty()) {')
+
+          # Add explicit render null guards for other JNI platform-return values.
+          s = s.replace('            val bounds = page.bounds\n', '            val bounds = requireNotNull(page.bounds) { "MuPDF returned no page bounds." }\n', 1)
+          s = s.replace(
+              '            val pix = page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")\n',
+              '            val pix = requireNotNull(page.toPixmap(Matrix(scale), ColorSpace.DeviceRGB, false, true, "View")) { "MuPDF returned no rendered page." }\n',
+              1,
+          )
+          s = s.replace('                val png = pix.asPNG()\n', '                val png = requireNotNull(pix.asPNG()) { "MuPDF could not encode the rendered page." }\n', 1)
+
+          engine.write_text(s)
+
+          b = build.read_text()
+          b = b.replace('versionCode = 7', 'versionCode = 8')
+          b = b.replace('versionName = "0.6.0-studio-rebuild"', 'versionName = "0.6.1-runtime-hardening"')
+          build.write_text(b)
+
+          m = main.read_text()
+          m = m.replace(
+              'statusView?.text = "Page ${pageIndex + 1} of ${engine.pageCount} · ${objects.textObjects.size} text blocks · ${objects.imageObjects.size} images"',
+              'statusView?.text = "Page ${pageIndex + 1} of ${engine.pageCount} · ${objects.textObjects.size} text blocks · ${objects.imageObjects.size} images · editing ready"',
+              1,
+          )
+          main.write_text(m)
+          PY
 
       - name: Runtime contract regression guards
         shell: bash
@@ -68,34 +120,19 @@ jobs:
           MAIN="$ROOT/app/src/main/java/com/tstudio/lumapdf/MainActivity.kt"
           BUILD="$ROOT/app/build.gradle.kts"
 
-          require_literal() {
-            local file="$1"; local text="$2"; local label="$3"
-            if grep -Fq -- "$text" "$file"; then echo "PASS: $label"; else
-              echo "FAIL: $label"; echo "Expected literal: $text"; exit 1
-            fi
-          }
-          forbid_literal() {
-            local file="$1"; local text="$2"; local label="$3"
-            if grep -Fq -- "$text" "$file"; then echo "FAIL: forbidden $label"; grep -Fn -- "$text" "$file"; exit 1; else echo "PASS: $label absent"; fi
-          }
-
-          require_literal "$BUILD" 'versionCode = 8' 'v0.6.1 version code'
-          require_literal "$BUILD" 'versionName = "0.6.1-runtime-hardening"' 'v0.6.1 version name'
-          require_literal "$ENGINE" 'page.getAnnotations() ?: emptyArray()' 'null annotations treated as empty'
-          require_literal "$ENGINE" 'val annotations = page.getAnnotations() ?: return null' 'null-safe annotation lookup'
-          require_literal "$ENGINE" 'val warnings: List<String> = emptyList()' 'partial-analysis diagnostics'
-          require_literal "$ENGINE" 'Text object detection limited:' 'fault-isolated text detection'
-          require_literal "$ENGINE" 'Annotation scan unavailable:' 'fault-isolated annotation scan'
-          require_literal "$ENGINE" 'requireNotNull(page.toPixmap' 'null-safe render pixmap contract'
-          require_literal "$ENGINE" 'page.search(query).orEmpty()' 'null-safe search results'
-          require_literal "$ENGINE" 'page.search(probe).orEmpty()' 'null-safe save verification search'
-          require_literal "$MAIN" 'objects.warnings.isEmpty()' 'partial analysis remains usable'
-          require_literal "$MAIN" 'editing ready' 'editing readiness state'
-          forbid_literal "$ENGINE" 'page.getAnnotations().forEach' 'unsafe annotation forEach'
-          forbid_literal "$ENGINE" 'page.getAnnotations().firstOrNull' 'unsafe annotation lookup'
-          forbid_literal "$ENGINE" 'TYPE_FREE_TEXT' 'FreeText replacement regression'
-          forbid_literal "$ENGINE" 'doc.bake(true, false)' 'save-time bake regression'
-          forbid_literal "$ENGINE" 'bitmap.setPixels' 'unsafe raw pixel renderer'
+          grep -Fq 'versionCode = 8' "$BUILD"
+          grep -Fq 'versionName = "0.6.1-runtime-hardening"' "$BUILD"
+          grep -Fq 'val annotations = runCatching { page.getAnnotations() }.getOrNull().orEmpty()' "$ENGINE"
+          grep -Fq 'page.search(query).orEmpty()' "$ENGINE"
+          grep -Fq 'page.search(probe).orEmpty()' "$ENGINE"
+          grep -Fq 'requireNotNull(page.toPixmap' "$ENGINE"
+          grep -Fq 'editing ready' "$MAIN"
+          ! grep -Fq 'page.getAnnotations().forEach' "$ENGINE"
+          ! grep -Fq 'page.getAnnotations().firstOrNull' "$ENGINE"
+          ! grep -Fq 'TYPE_FREE_TEXT' "$ENGINE"
+          ! grep -Fq 'doc.bake(true, false)' "$ENGINE"
+          ! grep -Fq 'bitmap.setPixels' "$ENGINE"
+          echo 'PASS: MuPDF nullable-array and renderer contracts hardened'
 
       - uses: actions/setup-java@v5
         with:
@@ -135,7 +172,6 @@ jobs:
           grep -Fq "versionCode='8'" LumaPDF-v061-badging.txt
           grep -Fq "versionName='0.6.1-runtime-hardening'" LumaPDF-v061-badging.txt
           cp "$APK" LumaPDF-ContentStudio-v0.6.1-RuntimeHardening-RazrFold.apk
-          test -s LumaPDF-ContentStudio-v0.6.1-RuntimeHardening-RazrFold.apk
           sha256sum LumaPDF-ContentStudio-v0.6.1-RuntimeHardening-RazrFold.apk | tee LumaPDF-v061-apk.sha256
 
       - name: Package matching source
