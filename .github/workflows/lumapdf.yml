@@ -1,0 +1,58 @@
+name: Build LumaPDF APK
+
+on:
+  push:
+    branches: [lumapdf-build]
+    paths:
+      - '.lumapdf/**'
+      - '.github/workflows/lumapdf.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct LumaPDF source
+        shell: bash
+        run: |
+          cat .lumapdf/source.part* | base64 --decode > lumapdf-source.zip
+          unzip -q lumapdf-source.zip
+          test -f LumaPDF_RazrFold_2026/settings.gradle.kts
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Build debug APK
+        working-directory: LumaPDF_RazrFold_2026
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          APK='LumaPDF_RazrFold_2026/app/build/outputs/apk/debug/app-debug.apk'
+          test -f "$APK"
+          ls -lh "$APK"
+          sha256sum "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaPDF-RazrFold-APK
+          path: LumaPDF_RazrFold_2026/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
