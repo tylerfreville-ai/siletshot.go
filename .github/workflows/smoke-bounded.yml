@@ -1,0 +1,155 @@
+name: Bounded Smoke Test Veil Browser APK
+
+on:
+  push:
+    branches:
+      - veil-browser-build
+    paths:
+      - .github/workflows/smoke-bounded.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - name: Download verified release-build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: veil-browser-v2-build
+          path: build
+          github-token: ${{ github.token }}
+          repository: tylerfreville-ai/siletshot.go
+          run-id: 31982429738
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install and configure clean Android image
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64"
+          echo no | avdmanager create avd --force \
+            --name veil-bounded-api35 \
+            --package "system-images;android-35;google_apis;x86_64" \
+            --device "pixel_7"
+          "$ANDROID_HOME/emulator/emulator" -list-avds
+
+      - name: Sign isolated smoke-test copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          PASS="$(openssl rand -hex 20)"
+          keytool -genkeypair -noprompt \
+            -keystore smoke-test.jks -storetype JKS \
+            -storepass "$PASS" -keypass "$PASS" \
+            -alias smoke -keyalg RSA -keysize 2048 -validity 2 \
+            -dname "CN=Veil Smoke Test, O=Veil, C=US"
+          java -jar build/tools/apksigner.jar sign \
+            --ks smoke-test.jks --ks-key-alias smoke \
+            --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
+            --v4-signing-enabled false \
+            --out Veil-Smoke-Test.apk \
+            build/Veil-Browser-v2.0.0-unsigned.apk
+          java -jar build/tools/apksigner.jar verify --verbose Veil-Smoke-Test.apk
+
+      - name: Boot emulator with bounded diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-results
+          sudo chmod 666 /dev/kvm || true
+          "$ANDROID_HOME/emulator/emulator" -accel-check 2>&1 | tee smoke-results/acceleration.txt || true
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd veil-bounded-api35 \
+            -no-window -noaudio -no-boot-anim \
+            -no-snapshot-load -no-snapshot-save -wipe-data \
+            -gpu auto -accel auto -no-metrics \
+            > smoke-results/emulator.log 2>&1 &
+          EMULATOR_PID=$!
+          echo "$EMULATOR_PID" > smoke-results/emulator.pid
+          sleep 12
+          if ! kill -0 "$EMULATOR_PID" 2>/dev/null; then
+            echo "Emulator process exited before ADB became available." >&2
+            cat smoke-results/emulator.log >&2
+            exit 1
+          fi
+          timeout 180 adb wait-for-device
+          timeout 240 bash -c 'until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = "1" ]; do sleep 4; done'
+          adb devices -l | tee smoke-results/adb-devices.txt
+          adb shell getprop > smoke-results/device-properties.txt
+
+      - name: Exercise compact and expanded layouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb install -r Veil-Smoke-Test.apk | tee smoke-results/install.txt
+
+          adb shell wm size 1080x2400
+          adb shell wm density 420
+          adb shell am force-stop com.veil.browser
+          adb logcat -c
+          adb shell am start -W -n com.veil.browser/.BrowserActivity | tee smoke-results/compact-start.txt
+          sleep 4
+          COMPACT_PID="$(adb shell pidof com.veil.browser | tr -d '\r')"
+          test -n "$COMPACT_PID"
+          adb exec-out screencap -p > smoke-results/compact.png
+          adb shell uiautomator dump /sdcard/compact.xml
+          adb pull /sdcard/compact.xml smoke-results/compact.xml >/dev/null
+          adb logcat -d --pid="$COMPACT_PID" -v threadtime > smoke-results/compact-logcat.txt
+          grep -Eq 'Search or enter address|VEIL' smoke-results/compact.xml
+          ! grep -Eq 'FATAL EXCEPTION|Process: com\.veil\.browser.*has died' smoke-results/compact-logcat.txt
+
+          adb shell wm size 2208x1840
+          adb shell wm density 420
+          adb shell am force-stop com.veil.browser
+          adb logcat -c
+          adb shell am start -W -n com.veil.browser/.BrowserActivity | tee smoke-results/expanded-start.txt
+          sleep 4
+          EXPANDED_PID="$(adb shell pidof com.veil.browser | tr -d '\r')"
+          test -n "$EXPANDED_PID"
+          adb exec-out screencap -p > smoke-results/expanded.png
+          adb shell uiautomator dump /sdcard/expanded.xml
+          adb pull /sdcard/expanded.xml smoke-results/expanded.xml >/dev/null
+          adb logcat -d --pid="$EXPANDED_PID" -v threadtime > smoke-results/expanded-logcat.txt
+          grep -q 'Protected browser' smoke-results/expanded.xml
+          ! grep -Eq 'FATAL EXCEPTION|Process: com\.veil\.browser.*has died' smoke-results/expanded-logcat.txt
+
+          adb shell dumpsys package com.veil.browser > smoke-results/package.txt
+          adb shell dumpsys activity activities > smoke-results/activity.txt
+          file smoke-results/compact.png smoke-results/expanded.png | tee smoke-results/screenshots.txt
+
+      - name: Capture final diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p smoke-results
+          adb devices -l > smoke-results/final-adb-devices.txt 2>&1 || true
+          adb logcat -d -v threadtime > smoke-results/final-logcat.txt 2>&1 || true
+          if [ -f smoke-results/emulator.pid ]; then
+            PID="$(cat smoke-results/emulator.pid)"
+            kill "$PID" 2>/dev/null || true
+          fi
+
+      - name: Upload smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: veil-browser-v2-bounded-smoke-results
+          path: smoke-results/
+          if-no-files-found: warn
+          retention-days: 7
