@@ -85,8 +85,17 @@ jobs:
             cat smoke-results/emulator.log >&2
             exit 1
           fi
-          timeout 180 adb wait-for-device
-          timeout 240 bash -c 'until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = "1" ]; do sleep 4; done'
+          if ! timeout 180 adb wait-for-device; then
+            echo "ADB never observed the emulator." >&2
+            cat smoke-results/emulator.log >&2
+            exit 1
+          fi
+          if ! timeout 240 bash -c 'until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = "1" ]; do sleep 4; done'; then
+            echo "The emulator connected to ADB but did not finish booting." >&2
+            adb devices -l >&2 || true
+            cat smoke-results/emulator.log >&2
+            exit 1
+          fi
           adb devices -l | tee smoke-results/adb-devices.txt
           adb shell getprop > smoke-results/device-properties.txt
 
@@ -118,7 +127,7 @@ jobs:
           adb shell wm density 420
           adb shell am force-stop com.veil.browser
           adb logcat -c
-          adb shell am start -W -n com.veil.browser/.BrowserActivity | tee smoke-results/expanded-start.txt
+          adb shell am start -W -n com.veil.browser/.BrowserActivy | tee smoke-results/expanded-start.txt
           sleep 4
           EXPANDED_PID="$(adb shell pidof com.veil.browser | tr -d '\r')"
           test -n "$EXPANDED_PID"
@@ -138,8 +147,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p smoke-results
-          adb devices -l > smoke-results/final-adb-devices.txt 2>&1 || true
-          adb logcat -d -v threadtime > smoke-results/final-logcat.txt 2>&1 || true
+          timeout 10 adb devices -l > smoke-results/final-adb-devices.txt 2>&1 || true
+          timeout 10 adb logcat -d -v threadtime > smoke-results/final-logcat.txt 2>&1 || true
           if [ -f smoke-results/emulator.pid ]; then
             PID="$(cat smoke-results/emulator.pid)"
             kill "$PID" 2>/dev/null || true
