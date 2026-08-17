@@ -1,2 +1,0 @@
-# siletshot.go
-Screenshot tool

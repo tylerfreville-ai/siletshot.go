@@ -1,20 +1,71 @@
-name: Build SilentShot
+name: Build Veil Browser APK
+
 on:
+  push:
+    branches:
+      - veil-browser-build
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Check out isolated build branch
+        uses: actions/checkout@v4
+
+      - name: Restore and verify reviewed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat payload/veilpart_*.b64 | base64 --decode > veil-browser-project.tar.gz
+          echo "8b4c8d94a29ecce7f0352fc09c58a112ba6b6ce5d6e918b4203fab617fb097bf  veil-browser-project.tar.gz" | sha256sum --check
+          mkdir -p veil-src
+          tar -xzf veil-browser-project.tar.gz -C veil-src
+          sed -i 's/Boolean::class.javaPrimitiveType/Boolean::class.javaPrimitiveType!!/' veil-src/app/src/main/java/com/veil/browser/BrowserActivity.kt
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
         with:
-          go-version: "1.22"
-      - name: Resolve dependencies
-        run: go mod tidy
-      - name: Build single-file exe, no console window
-        run: go build -ldflags "-H=windowsgui" -trimpath -o SilentShot.exe .
-      - uses: actions/upload-artifact@v4
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and build tools
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          name: SilentShot
-          path: SilentShot.exe
+          gradle-version: '8.10.2'
+
+      - name: Compile release APK
+        working-directory: veil-src
+        run: gradle --no-daemon assembleRelease
+
+      - name: Prepare unsigned build and local signing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/tools
+          cp veil-src/app/build/outputs/apk/release/app-release-unsigned.apk dist/Veil-Browser-v2.0.0-unsigned.apk
+          cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" dist/tools/apksigner.jar
+          cp "$ANDROID_HOME/build-tools/35.0.0/zipalign" dist/tools/zipalign
+          chmod +x dist/tools/zipalign
+          sha256sum dist/Veil-Browser-v2.0.0-unsigned.apk > dist/UNSIGNED_SHA256.txt
+
+      - name: Upload unsigned APK and signing tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: veil-browser-v2-build
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
