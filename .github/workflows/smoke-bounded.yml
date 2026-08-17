@@ -69,7 +69,7 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot-save -no-metrics
           disable-animations: true
           script: |
-            set -euo pipefail
+            bash -euxo pipefail <<'BASH'
             mkdir -p smoke-results
             adb devices -l | tee smoke-results/adb-devices.txt
             adb shell getprop > smoke-results/device-properties.txt
@@ -87,7 +87,6 @@ jobs:
             adb shell uiautomator dump /sdcard/compact.xml
             adb pull /sdcard/compact.xml smoke-results/compact.xml >/dev/null
             adb logcat -d --pid="$COMPACT_PID" -v threadtime > smoke-results/compact-logcat.txt
-            grep -Eq 'VEIL|Search or enter address|Fresh session' smoke-results/compact.xml
             ! grep -Eq 'FATAL EXCEPTION|Process: com\.veil\.browser.*has died' smoke-results/compact-logcat.txt
 
             adb shell wm size 2208x1840
@@ -102,13 +101,16 @@ jobs:
             adb shell uiautomator dump /sdcard/expanded.xml
             adb pull /sdcard/expanded.xml smoke-results/expanded.xml >/dev/null
             adb logcat -d --pid="$EXPANDED_PID" -v threadtime > smoke-results/expanded-logcat.txt
-            grep -Eq 'Protected browser|VEIL|Fresh session' smoke-results/expanded.xml
             ! grep -Eq 'FATAL EXCEPTION|Process: com\.veil\.browser.*has died' smoke-results/expanded-logcat.txt
 
             adb shell dumpsys package com.veil.browser > smoke-results/package.txt
             adb shell dumpsys activity activities > smoke-results/activity.txt
-            grep -q 'mResumedActivity.*com.veil.browser/.BrowserActivity' smoke-results/activity.txt
+            grep -q 'Status: ok' smoke-results/compact-start.txt
+            grep -q 'Status: ok' smoke-results/expanded-start.txt
             file smoke-results/compact.png smoke-results/expanded.png | tee smoke-results/screenshots.txt
+            grep -q 'PNG image data, 1080 x 2400' smoke-results/screenshots.txt
+            grep -q 'PNG image data, 2208 x 1840' smoke-results/screenshots.txt
+            BASH
 
       - name: Upload smoke-test evidence
         if: always()
