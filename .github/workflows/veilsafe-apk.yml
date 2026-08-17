@@ -1,0 +1,84 @@
+name: Build VeilSafe Android APK
+
+on:
+  push:
+    branches:
+      - veilsafe/android-apk-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out isolated build branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Expand VeilSafe source
+        shell: bash
+        run: |
+          cat veilsafe-source.b64.part* | base64 --decode > veilsafe-android-source.tar.gz
+          mkdir -p veilsafe-android
+          tar -xzf veilsafe-android-source.tar.gz -C veilsafe-android
+          test -f veilsafe-android/settings.gradle
+
+      - name: Unit test, lint, and assemble release
+        shell: bash
+        run: |
+          gradle --no-daemon --stacktrace -p veilsafe-android \
+            clean testReleaseUnitTest lintRelease assembleRelease
+
+      - name: Inspect unsigned APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="veilsafe-android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          test -s "$APK"
+          mkdir -p artifact/build-tools
+          cp "$APK" artifact/VeilSafeBrowser-Android-v1.0.0-unsigned.apk
+          cp -a "$ANDROID_HOME/build-tools/36.0.0/." artifact/build-tools/
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" | tee artifact/APK_BADGING.txt
+          sha256sum artifact/VeilSafeBrowser-Android-v1.0.0-unsigned.apk | tee artifact/SHA256SUMS.txt
+          cp veilsafe-android/app/build/reports/lint-results-release.html artifact/ 2>/dev/null || true
+          cp -r veilsafe-android/app/build/reports/tests artifact/unit-test-report 2>/dev/null || true
+          cat > artifact/BUILD_INFO.txt <<INFO
+          Git commit: $GITHUB_SHA
+          Workflow run: $GITHUB_RUN_ID
+          Android Gradle Plugin: 8.13.2
+          Gradle: 8.13
+          compileSdk/targetSdk: 36
+          Build Tools: 36.0.0
+          Java: 17
+          INFO
+
+      - name: Upload unsigned APK and official signing tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: veilsafe-unsigned-apk-and-signing-tools
+          path: artifact
+          if-no-files-found: error
+          retention-days: 7
